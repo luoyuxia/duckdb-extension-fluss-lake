@@ -1,0 +1,27 @@
+[package]
+name = "paimon-ffi"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "paimon_ffi"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+paimon = { path = "../../../rust-projects/paimon-rust/crates/paimon" }
+tokio = { version = "1.39", features = ["full"] }
+arrow-array = "52"
+arrow-schema = "52"
+arrow = { version = "52", features = ["ffi"] }
+futures-util = "0.3"
+
+# Patch arrow-arith to fix chrono 0.4.42 compatibility issue
+# The issue is that chrono 0.4.42 added quarter() to Datelike trait,
+# which conflicts with ChronoDateExt::quarter()
+[patch.crates-io]
+arrow-arith = { path = "../patches/arrow-arith-52.2.0" }
+
+[profile.release]
+opt-level = 3
+lto = true
+
