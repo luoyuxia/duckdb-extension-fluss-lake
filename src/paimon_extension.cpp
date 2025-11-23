@@ -18,12 +18,12 @@ struct PaimonBindData : public TableFunctionData {
 	std::string database;
 	std::string table;
 	PaimonCatalog* catalog = nullptr;
-	PaimonScan* scan = nullptr;
+	PaimonTable* table_schema = nullptr;  // Store table schema (no scan)
 
 	~PaimonBindData() override {
-		if (scan) {
-			paimon_scan_free(scan);
-			scan = nullptr;
+		if (table_schema) {
+			paimon_table_free(table_schema);
+			table_schema = nullptr;
 		}
 		if (catalog) {
 			paimon_catalog_free(catalog);
@@ -95,11 +95,11 @@ static unique_ptr<FunctionData> PaimonBind(ClientContext &context, TableFunction
 		throw InvalidInputException("Failed to create Paimon catalog");
 	}
 
-	// Scan table
+	// Get table schema without scanning
 	PaimonError* error = nullptr;
-	result->scan = paimon_table_scan(result->catalog, result->database.c_str(), result->table.c_str(), &error);
-	if (!result->scan) {
-		std::string error_msg = "Failed to scan Paimon table";
+	result->table_schema = paimon_table_get_schema(result->catalog, result->database.c_str(), result->table.c_str(), &error);
+	if (!result->table_schema) {
+		std::string error_msg = "Failed to get Paimon table schema";
 		if (error) {
 			const char* msg = paimon_error_get_message(error);
 			if (msg) {
@@ -112,14 +112,14 @@ static unique_ptr<FunctionData> PaimonBind(ClientContext &context, TableFunction
 	}
 
 	// Get schema and populate return types and names
-	int32_t column_count = paimon_scan_get_column_count(result->scan);
+	int32_t column_count = paimon_table_get_column_count(result->table_schema);
 	if (column_count <= 0) {
 		throw InvalidInputException("Paimon table has no columns");
 	}
 
 	for (int32_t i = 0; i < column_count; i++) {
-		const char* col_name = paimon_scan_get_column_name(result->scan, i);
-		const char* col_type = paimon_scan_get_column_type(result->scan, i);
+		const char* col_name = paimon_table_get_column_name(result->table_schema, i);
+		const char* col_type = paimon_table_get_column_type(result->table_schema, i);
 		
 		if (!col_name) {
 			throw InvalidInputException("Failed to get column name");
@@ -158,9 +158,22 @@ static unique_ptr<GlobalTableFunctionState> PaimonInitGlobal(ClientContext &cont
 	auto &bind_data = input.bind_data->Cast<PaimonBindData>();
 	auto result = make_uniq<PaimonGlobalState>();
 
-	// Transfer ownership of scan from bind_data
-	result->scan = bind_data.scan;
-	const_cast<PaimonBindData&>(bind_data).scan = nullptr; // Transfer ownership
+	// Now perform the actual scan
+	PaimonError* paimon_error = nullptr;
+	result->scan = paimon_table_scan(bind_data.catalog, bind_data.database.c_str(), bind_data.table.c_str(), &paimon_error);
+	if (!result->scan) {
+		std::string error_msg = "Failed to scan Paimon table";
+		if (paimon_error) {
+			const char* msg = paimon_error_get_message(paimon_error);
+			if (msg) {
+				error_msg += ": ";
+				error_msg += msg;
+			}
+			paimon_error_free(paimon_error);
+		}
+		throw InvalidInputException(error_msg);
+	}
+	
 	result->total_batches = paimon_scan_get_batch_count(result->scan);
 	result->current_batch = 0;
 
@@ -177,11 +190,11 @@ static unique_ptr<GlobalTableFunctionState> PaimonInitGlobal(ClientContext &cont
 	result->schema_exported = true;
 
 	// Convert Arrow schema to DuckDB schema
-	auto error = duckdb_schema_from_arrow(conn_handle, &result->arrow_schema, &result->converted_schema);
-	if (error) {
-		const char* error_msg = duckdb_error_data_message(error);
+	duckdb_error_data error_data = duckdb_schema_from_arrow(conn_handle, &result->arrow_schema, &result->converted_schema);
+	if (error_data) {
+		const char* error_msg = duckdb_error_data_message(error_data);
 		std::string msg = error_msg ? error_msg : "Failed to convert Arrow schema";
-		duckdb_destroy_error_data(&error);
+		duckdb_destroy_error_data(&error_data);
 		throw InvalidInputException(msg);
 	}
 
