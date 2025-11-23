@@ -20,65 +20,18 @@ use std::os::raw::{c_char, c_int};
 use std::ptr;
 use std::sync::Arc;
 
-use arrow_array::RecordBatch;
-use arrow_array::Array;
-use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
-use arrow_schema::{DataType as ArrowDataType, Field, Fields, Schema as ArrowSchema};
-use arrow_array::ffi::to_ffi;
 use arrow::array::StructArray;
+use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
+use arrow_array::ffi::to_ffi;
+use arrow_array::Array;
+use arrow_array::RecordBatch;
+use arrow_schema::Schema as ArrowSchema;
 use futures_util::TryStreamExt;
-use paimon::catalog::{Catalog, FileSystemCatalog, Identifier};
+use paimon::arrow::schema_to_arrow_schema;
+use paimon::catalog::{Catalog, FileSystemCatalog, Identifier, Table};
 use paimon::io::FileIOBuilder;
+use paimon::scan::{ArrowRecordBatchStream, TableScan};
 use paimon::Result as PaimonResult;
-use paimon::spec::DataType as PaimonDataType;
-
-/// Convert Paimon DataType to Arrow DataType
-fn paimon_to_arrow_type(dt: &PaimonDataType) -> ArrowDataType {
-    match dt {
-        PaimonDataType::Boolean(_) => ArrowDataType::Boolean,
-        PaimonDataType::TinyInt(_) => ArrowDataType::Int8,
-        PaimonDataType::SmallInt(_) => ArrowDataType::Int16,
-        PaimonDataType::Int(_) => ArrowDataType::Int32,
-        PaimonDataType::BigInt(_) => ArrowDataType::Int64,
-        PaimonDataType::Float(_) => ArrowDataType::Float32,
-        PaimonDataType::Double(_) => ArrowDataType::Float64,
-        PaimonDataType::Decimal(d) => ArrowDataType::Decimal128(d.precision() as u8, d.scale() as i8),
-        PaimonDataType::Char(_) | PaimonDataType::VarChar(_) => ArrowDataType::Utf8,
-        PaimonDataType::Binary(_) | PaimonDataType::VarBinary(_) => ArrowDataType::Binary,
-        PaimonDataType::Date(_) => ArrowDataType::Date32,
-        PaimonDataType::Time(_) => ArrowDataType::Time64(arrow_schema::TimeUnit::Nanosecond),
-        PaimonDataType::Timestamp(_) | PaimonDataType::LocalZonedTimestamp(_) => {
-            ArrowDataType::Timestamp(arrow_schema::TimeUnit::Nanosecond, None)
-        }
-        PaimonDataType::Array(_) => {
-            // For now, use Utf8 as element type since we can't access private fields
-            // TODO: Add public accessor methods to Paimon types or use pattern matching
-            ArrowDataType::List(arrow_schema::Field::new("element", ArrowDataType::Utf8, true).into())
-        }
-        PaimonDataType::Map(_) => {
-            // For now, use simple struct since we can't access private fields
-            // TODO: Add public accessor methods to Paimon types
-            let struct_fields: Fields = vec![
-                Field::new("key", ArrowDataType::Utf8, false),
-                Field::new("value", ArrowDataType::Utf8, true),
-            ].into();
-            ArrowDataType::Map(
-                arrow_schema::Field::new(
-                    "entries",
-                    ArrowDataType::Struct(struct_fields),
-                    false,
-                ).into(),
-                false,
-            )
-        }
-        PaimonDataType::Multiset(_) => {
-            // For now, use Utf8 as element type since we can't access private fields
-            // TODO: Add public accessor methods to Paimon types
-            ArrowDataType::List(arrow_schema::Field::new("element", ArrowDataType::Utf8, true).into())
-        }
-        _ => ArrowDataType::Utf8, // Default to Utf8 for unknown types
-    }
-}
 
 /// Opaque handle for a Paimon catalog
 #[repr(C)]
@@ -90,15 +43,21 @@ pub struct PaimonCatalog {
 /// Opaque handle for a Paimon table (schema only, no scan)
 #[repr(C)]
 pub struct PaimonTable {
+    table: Arc<Table>,
     schema: Arc<ArrowSchema>,
+    rt_handle: tokio::runtime::Handle,
 }
 
 /// Opaque handle for a Paimon table scan
+/// Contains TableScan which is created in paimon_table_scan
+/// Arrow stream is created lazily when paimon_scan_export_batch is first called
+/// Note: No mutex needed since DuckDB guarantees single-threaded access to GlobalTableFunctionState
 #[repr(C)]
 pub struct PaimonScan {
-    batches: Vec<RecordBatch>,
-    current_index: usize,
+    table_scan: TableScan,
+    arrow_stream: Option<ArrowRecordBatchStream>,
     schema: Arc<ArrowSchema>,
+    rt_handle: tokio::runtime::Handle
 }
 
 /// Error information
@@ -150,9 +109,9 @@ pub extern "C" fn paimon_catalog_free(catalog: *mut PaimonCatalog) {
     }
 }
 
-/// Get table schema without scanning
+/// Get Paimon table handle (with schema, without scanning)
 #[no_mangle]
-pub extern "C" fn paimon_table_get_schema(
+pub extern "C" fn get_paimon_table(
     catalog: *mut PaimonCatalog,
     database: *const c_char,
     table: *const c_char,
@@ -173,9 +132,7 @@ pub extern "C" fn paimon_table_get_schema(
             Ok(s) => s,
             Err(_) => {
                 if !error_out.is_null() {
-                    unsafe {
-                        *error_out = create_error("Invalid database name encoding");
-                    }
+                    *error_out = create_error("Invalid database name encoding");
                 }
                 return ptr::null_mut();
             }
@@ -186,9 +143,7 @@ pub extern "C" fn paimon_table_get_schema(
             Ok(s) => s,
             Err(_) => {
                 if !error_out.is_null() {
-                    unsafe {
-                        *error_out = create_error("Invalid table name encoding");
-                    }
+                    *error_out = create_error("Invalid table name encoding");
                 }
                 return ptr::null_mut();
             }
@@ -197,36 +152,19 @@ pub extern "C" fn paimon_table_get_schema(
 
     let identifier = Identifier::new(db_str, table_str);
 
-    // Get table schema without scanning data
-    // We get the schema by getting current snapshot and using schema_by_snapshot
-    let result: PaimonResult<Arc<ArrowSchema>> = catalog_ref.rt.block_on(async {
+    let result: PaimonResult<(Arc< Table>, Arc<ArrowSchema>)> = catalog_ref.rt.block_on(async {
         let table = catalog_ref.catalog.get_table(&identifier).await?;
-        // Get current snapshot and use schema_by_snapshot to get schema
-        let snapshot = table.current_snapshot().await?;
-        let snapshot_ref = snapshot.ok_or_else(|| paimon::Error::DataInvalid {
-            message: "Table has no snapshot".to_string(),
-            source: None,
-        })?;
-        let snapshot_ref_arc = Arc::new(snapshot_ref);
-        let table_schema = table.schema_by_snapshot(snapshot_ref_arc).await
-            .ok_or_else(|| paimon::Error::DataInvalid {
-                message: "Failed to get table schema from snapshot".to_string(),
-                source: None,
-            })?;
-        // Convert TableSchema fields to Arrow Schema fields
-        let arrow_fields: Vec<Field> = table_schema.fields().iter().map(|field| {
-            // Convert Paimon DataType to Arrow DataType
-            let arrow_data_type = paimon_to_arrow_type(field.data_type());
-            Field::new(field.name(), arrow_data_type, true)
-        }).collect();
-        let arrow_schema = ArrowSchema::new(arrow_fields);
-        Ok(Arc::new(arrow_schema))
+        let arrow_schema = schema_to_arrow_schema(&table.table_schema())?;
+        let table_arc: Arc< Table> = Arc::new(table);
+        Ok((table_arc, Arc::new(arrow_schema)))
     });
 
     match result {
-        Ok(schema) => {
+        Ok((table, schema)) => {
             Box::into_raw(Box::new(PaimonTable {
+                table,
                 schema,
+                rt_handle: catalog_ref.rt.handle().clone(),
             }))
         }
         Err(e) => {
@@ -295,6 +233,28 @@ pub extern "C" fn paimon_table_get_column_type(
     }
 }
 
+/// Export table schema to Arrow C Data Interface
+#[no_mangle]
+pub extern "C" fn paimon_table_export_schema(
+    table: *mut PaimonTable,
+    out_schema: *mut FFI_ArrowSchema,
+) -> c_int {
+    if table.is_null() || out_schema.is_null() {
+        return 1; // Error
+    }
+    unsafe {
+        let table_ref = &*table;
+        // Export schema to FFI
+        match FFI_ArrowSchema::try_from(table_ref.schema.as_ref()) {
+            Ok(ffi_schema) => {
+                *out_schema = ffi_schema;
+                0 // Success
+            }
+            Err(_) => 1, // Error
+        }
+    }
+}
+
 /// Free a Paimon table handle
 #[no_mangle]
 pub extern "C" fn paimon_table_free(table: *mut PaimonTable) {
@@ -306,14 +266,13 @@ pub extern "C" fn paimon_table_free(table: *mut PaimonTable) {
 }
 
 /// Scan a Paimon table and return a handle
+/// Uses the Table object stored in PaimonTable
 #[no_mangle]
 pub extern "C" fn paimon_table_scan(
-    catalog: *mut PaimonCatalog,
-    database: *const c_char,
-    table: *const c_char,
+    paimon_table: *mut PaimonTable,
     error_out: *mut *mut PaimonError,
 ) -> *mut PaimonScan {
-    if catalog.is_null() || database.is_null() || table.is_null() {
+    if paimon_table.is_null() {
         if !error_out.is_null() {
             unsafe {
                 *error_out = create_error("Null pointer provided");
@@ -322,194 +281,101 @@ pub extern "C" fn paimon_table_scan(
         return ptr::null_mut();
     }
 
-    let catalog_ref = unsafe { &*catalog };
-    let db_str = unsafe {
-        match CStr::from_ptr(database).to_str() {
-            Ok(s) => s,
-            Err(_) => {
-                if !error_out.is_null() {
-                    unsafe {
-                        *error_out = create_error("Invalid database name encoding");
-                    }
-                }
-                return ptr::null_mut();
-            }
-        }
-    };
-    let table_str = unsafe {
-        match CStr::from_ptr(table).to_str() {
-            Ok(s) => s,
-            Err(_) => {
-                if !error_out.is_null() {
-                    unsafe {
-                        *error_out = create_error("Invalid table name encoding");
-                    }
-                }
-                return ptr::null_mut();
-            }
-        }
-    };
+    let table_ref = unsafe { &*paimon_table };
+    let table = table_ref.table.clone();
+    let schema = table_ref.schema.clone();
+    let rt_handle = table_ref.rt_handle.clone();
 
-    let identifier = Identifier::new(db_str, table_str);
-
-    // Scan the table
-    let result: PaimonResult<(Vec<RecordBatch>, Arc<ArrowSchema>)> = catalog_ref.rt.block_on(async {
-        let table = catalog_ref.catalog.get_table(&identifier).await?;
-        let scan = table.scan().build().await?;
-        let arrow_stream = scan.to_arrow().await?;
-        
-        // Collect all batches
-        let batches: Vec<RecordBatch> = arrow_stream.try_collect().await?;
-        let schema = if let Some(first_batch) = batches.first() {
-            first_batch.schema()
-        } else {
-            // Return empty schema if no batches
-            Arc::new(ArrowSchema::empty())
-        };
-        
-        Ok((batches, schema))
+    // Create TableScan here, but don't create arrow stream yet
+    // The arrow stream will be created lazily when paimon_scan_export_batch is first called
+    let table_scan_result: PaimonResult<TableScan> = rt_handle.block_on(async {
+        table.scan().build().await
     });
 
-    match result {
-        Ok((batches, schema)) => {
-            Box::into_raw(Box::new(PaimonScan {
-                batches,
-                current_index: 0,
-                schema,
-            }))
-        }
+    let table_scan = match table_scan_result {
+        Ok(scan) => scan,
         Err(e) => {
             if !error_out.is_null() {
                 unsafe {
-                    *error_out = create_error(&format!("{}", e));
+                    *error_out = create_error(&format!("Failed to create table scan: {}", e));
                 }
             }
-            ptr::null_mut()
-        }
-    }
-}
-
-/// Get the schema of a scan
-#[no_mangle]
-pub extern "C" fn paimon_scan_get_schema(scan: *mut PaimonScan) -> *const ArrowSchema {
-    if scan.is_null() {
-        return ptr::null_mut();
-    }
-    unsafe {
-        let scan_ref = &*scan;
-        Arc::as_ptr(&scan_ref.schema) as *const ArrowSchema
-    }
-}
-
-/// Get the number of columns in the schema
-#[no_mangle]
-pub extern "C" fn paimon_scan_get_column_count(scan: *mut PaimonScan) -> c_int {
-    if scan.is_null() {
-        return 0;
-    }
-    unsafe {
-        let scan_ref = &*scan;
-        scan_ref.schema.fields().len() as c_int
-    }
-}
-
-/// Get column name
-#[no_mangle]
-pub extern "C" fn paimon_scan_get_column_name(
-    scan: *mut PaimonScan,
-    index: c_int,
-) -> *const c_char {
-    if scan.is_null() {
-        return ptr::null_mut();
-    }
-    unsafe {
-        let scan_ref = &*scan;
-        let fields = scan_ref.schema.fields();
-        if index < 0 || index as usize >= fields.len() {
             return ptr::null_mut();
         }
-        let field = &fields[index as usize];
-        let name = CString::new(field.name().as_str()).unwrap();
-        name.into_raw()
-    }
+    };
+
+    Box::into_raw(Box::new(PaimonScan {
+        table_scan,
+        arrow_stream: None,
+        schema,
+        rt_handle,
+    }))
 }
 
-/// Get column data type as string
-#[no_mangle]
-pub extern "C" fn paimon_scan_get_column_type(
-    scan: *mut PaimonScan,
-    index: c_int,
-) -> *const c_char {
-    if scan.is_null() {
-        return ptr::null_mut();
-    }
-    unsafe {
-        let scan_ref = &*scan;
-        let fields = scan_ref.schema.fields();
-        if index < 0 || index as usize >= fields.len() {
-            return ptr::null_mut();
-        }
-        let field = &fields[index as usize];
-        let type_str = format!("{:?}", field.data_type());
-        let c_str = CString::new(type_str).unwrap();
-        c_str.into_raw()
-    }
-}
-
-/// Get the number of batches
-#[no_mangle]
-pub extern "C" fn paimon_scan_get_batch_count(scan: *mut PaimonScan) -> c_int {
-    if scan.is_null() {
-        return 0;
-    }
-    unsafe {
-        let scan_ref = &*scan;
-        scan_ref.batches.len() as c_int
-    }
-}
-
-/// Export Arrow schema to Arrow C Data Interface
-#[no_mangle]
-pub extern "C" fn paimon_scan_export_schema(
-    scan: *mut PaimonScan,
-    out_schema: *mut FFI_ArrowSchema,
-) -> c_int {
-    if scan.is_null() || out_schema.is_null() {
-        return 1; // Error
-    }
-    unsafe {
-        let scan_ref = &*scan;
-        // Export schema to FFI
-        match FFI_ArrowSchema::try_from(scan_ref.schema.as_ref()) {
-            Ok(ffi_schema) => {
-                *out_schema = ffi_schema;
-                0 // Success
-            }
-            Err(_) => 1, // Error
-        }
-    }
-}
-
-/// Export a batch by index to Arrow C Data Interface
+/// Export the next batch to Arrow C Data Interface
+/// Gets the next batch from the stream in streaming mode
 #[no_mangle]
 pub extern "C" fn paimon_scan_export_batch(
     scan: *mut PaimonScan,
-    index: c_int,
     out_array: *mut FFI_ArrowArray,
 ) -> c_int {
     if scan.is_null() || out_array.is_null() {
         return 1; // Error
     }
     unsafe {
-        let scan_ref = &*scan;
-        if index < 0 || index as usize >= scan_ref.batches.len() {
-            return 1; // Error
+        // Get mutable reference to scan (safe because DuckDB guarantees single-threaded access)
+        let scan_ref = &mut *scan;
+        
+        // Lazy initialization: create stream on first call
+        if scan_ref.arrow_stream.is_none() {
+            let table_scan = &scan_ref.table_scan;
+            let rt_handle = scan_ref.rt_handle.clone();
+            
+            // Create Arrow stream from TableScan
+            let arrow_stream_result: PaimonResult<ArrowRecordBatchStream> = rt_handle.block_on(async {
+                table_scan.to_arrow().await
+            });
+            
+            match arrow_stream_result {
+                Ok(stream) => {
+                    scan_ref.arrow_stream = Some(stream);
+                }
+                Err(_) => {
+                    // Error creating stream
+                    return 1;
+                }
+            }
         }
-        let batch = &scan_ref.batches[index as usize];
+        
+        // Get the stream (we need mutable access to take it out)
+        let mut stream = match scan_ref.arrow_stream.take() {
+            Some(s) => s,
+            None => return 1, // Should not happen - we just created it
+        };
+        
+        // Get next batch from stream (blocking)
+        let batch_result = scan_ref.rt_handle.block_on(async {
+            stream.try_next().await
+        });
+        
+        // Put the stream back
+        scan_ref.arrow_stream = Some(stream);
+        
+        let batch = match batch_result {
+            Ok(Some(batch)) => batch,
+            Ok(None) => {
+                // Stream ended
+                return 1;
+            }
+            Err(_) => {
+                // Error reading batch
+                return 1;
+            }
+        };
         
         // Convert RecordBatch to StructArray, then to ArrayData for FFI export
         // RecordBatch is essentially a StructArray where each field is a column
-        let struct_array = StructArray::from(batch.clone());
+        let struct_array = StructArray::from(batch);
         let array_data = struct_array.to_data();
         
         // Export ArrayData to FFI
@@ -520,24 +386,6 @@ pub extern "C" fn paimon_scan_export_batch(
             }
             Err(_) => 1, // Error
         }
-    }
-}
-
-/// Get a batch by index (returns a pointer to RecordBatch) - deprecated, use paimon_scan_export_batch
-#[no_mangle]
-pub extern "C" fn paimon_scan_get_batch(
-    scan: *mut PaimonScan,
-    index: c_int,
-) -> *const RecordBatch {
-    if scan.is_null() {
-        return ptr::null_mut();
-    }
-    unsafe {
-        let scan_ref = &*scan;
-        if index < 0 || index as usize >= scan_ref.batches.len() {
-            return ptr::null_mut();
-        }
-        &scan_ref.batches[index as usize] as *const RecordBatch
     }
 }
 

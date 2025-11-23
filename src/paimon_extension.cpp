@@ -6,7 +6,10 @@
 #include "duckdb/common/arrow/arrow.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/function/table_function.hpp"
+#include "duckdb/function/table/arrow.hpp"
+#include "duckdb/function/table/arrow/arrow_duck_schema.hpp"
 #include "duckdb/main/capi/capi_internal.hpp"
+#include "duckdb/main/config.hpp"
 #include <memory>
 #include <string>
 
@@ -18,12 +21,20 @@ struct PaimonBindData : public TableFunctionData {
 	std::string database;
 	std::string table;
 	PaimonCatalog* catalog = nullptr;
-	PaimonTable* table_schema = nullptr;  // Store table schema (no scan)
+	PaimonTable* paimon_table = nullptr;  // Store table
+	ArrowSchema arrow_schema;  // Arrow schema exported from table
+
+	PaimonBindData() {
+		arrow_schema.Init();
+	}
 
 	~PaimonBindData() override {
-		if (table_schema) {
-			paimon_table_free(table_schema);
-			table_schema = nullptr;
+		if (arrow_schema.release) {
+			arrow_schema.release(&arrow_schema);
+		}
+		if (paimon_table) {
+			paimon_table_free(paimon_table);
+			paimon_table = nullptr;
 		}
 		if (catalog) {
 			paimon_catalog_free(catalog);
@@ -35,19 +46,12 @@ struct PaimonBindData : public TableFunctionData {
 // Global state for Paimon table function
 struct PaimonGlobalState : public GlobalTableFunctionState {
 	PaimonScan* scan = nullptr;
-	int32_t current_batch = 0;
-	int32_t total_batches = 0;
-	ArrowSchema arrow_schema;
 	duckdb_arrow_converted_schema converted_schema = nullptr;
 	Connection* connection = nullptr;
-	bool schema_exported = false;
 
 	~PaimonGlobalState() override {
 		if (converted_schema) {
 			duckdb_destroy_arrow_converted_schema(&converted_schema);
-		}
-		if (schema_exported && arrow_schema.release) {
-			arrow_schema.release(&arrow_schema);
 		}
 		if (connection) {
 			delete connection;
@@ -60,9 +64,8 @@ struct PaimonGlobalState : public GlobalTableFunctionState {
 	}
 };
 
-// Local state for Paimon table function
+// Local state for Paimon table function (currently unused, but required by DuckDB API)
 struct PaimonLocalState : public LocalTableFunctionState {
-	int32_t current_row_in_batch = 0;
 };
 
 // Bind function for Paimon table function
@@ -71,23 +74,27 @@ static unique_ptr<FunctionData> PaimonBind(ClientContext &context, TableFunction
 	auto result = make_uniq<PaimonBindData>();
 
 	// Get warehouse path (required)
-	if (input.inputs.size() < 1) {
+	if (input.inputs.empty()) {
 		throw InvalidInputException("paimon_read requires at least warehouse_path parameter");
 	}
 	result->warehouse_path = input.inputs[0].GetValue<string>();
 
-	// Get database (optional, defaults to "default")
-	if (input.inputs.size() >= 2) {
-		result->database = input.inputs[1].GetValue<string>();
-	} else {
+	// Parse parameters:
+	// - 2 parameters: warehouse_path, table (database defaults to "default")
+	// - 3 parameters: warehouse_path, database, table
+	if (input.inputs.size() < 2) {
+		throw InvalidInputException("paimon_read requires at least warehouse_path and table parameters");
+	}
+	
+	if (input.inputs.size() == 2) {
+		// 2 parameters: warehouse_path, table
 		result->database = "default";
+		result->table = input.inputs[1].GetValue<string>();
+	} else if (input.inputs.size() >= 3) {
+		// 3+ parameters: warehouse_path, database, table
+		result->database = input.inputs[1].GetValue<string>();
+		result->table = input.inputs[2].GetValue<string>();
 	}
-
-	// Get table (required)
-	if (input.inputs.size() < 3) {
-		throw InvalidInputException("paimon_read requires table parameter");
-	}
-	result->table = input.inputs[2].GetValue<string>();
 
 	// Create catalog
 	result->catalog = paimon_catalog_new(result->warehouse_path.c_str());
@@ -95,14 +102,13 @@ static unique_ptr<FunctionData> PaimonBind(ClientContext &context, TableFunction
 		throw InvalidInputException("Failed to create Paimon catalog");
 	}
 
-	// Get table schema without scanning
+	// Get Paimon table handle without scanning
 	PaimonError* error = nullptr;
-	result->table_schema = paimon_table_get_schema(result->catalog, result->database.c_str(), result->table.c_str(), &error);
-	if (!result->table_schema) {
+	result->paimon_table = get_paimon_table(result->catalog, result->database.c_str(), result->table.c_str(), &error);
+	if (!result->paimon_table) {
 		std::string error_msg = "Failed to get Paimon table schema";
 		if (error) {
-			const char* msg = paimon_error_get_message(error);
-			if (msg) {
+			if (const char *msg = paimon_error_get_message(error)) {
 				error_msg += ": ";
 				error_msg += msg;
 			}
@@ -111,43 +117,23 @@ static unique_ptr<FunctionData> PaimonBind(ClientContext &context, TableFunction
 		throw InvalidInputException(error_msg);
 	}
 
-	// Get schema and populate return types and names
-	int32_t column_count = paimon_table_get_column_count(result->table_schema);
-	if (column_count <= 0) {
-		throw InvalidInputException("Paimon table has no columns");
+	// Export Arrow schema from Paimon table and save it in bind_data
+	if (paimon_table_export_schema(result->paimon_table, &result->arrow_schema) != 0) {
+		throw InvalidInputException("Failed to export Arrow schema from Paimon table");
 	}
 
-	for (int32_t i = 0; i < column_count; i++) {
-		const char* col_name = paimon_table_get_column_name(result->table_schema, i);
-		const char* col_type = paimon_table_get_column_type(result->table_schema, i);
-		
-		if (!col_name) {
-			throw InvalidInputException("Failed to get column name");
-		}
-		names.push_back(col_name);
-
-		// Map Arrow types to DuckDB types
-		// This is a simplified mapping - you may need to enhance this
-		std::string type_str = col_type ? col_type : "VARCHAR";
-		LogicalType duckdb_type;
-		
-		if (type_str.find("Int32") != std::string::npos || type_str.find("Int") != std::string::npos) {
-			duckdb_type = LogicalType::INTEGER;
-		} else if (type_str.find("Int64") != std::string::npos || type_str.find("Long") != std::string::npos) {
-			duckdb_type = LogicalType::BIGINT;
-		} else if (type_str.find("Float") != std::string::npos || type_str.find("Double") != std::string::npos) {
-			duckdb_type = LogicalType::DOUBLE;
-		} else if (type_str.find("Boolean") != std::string::npos || type_str.find("Bool") != std::string::npos) {
-			duckdb_type = LogicalType::BOOLEAN;
-		} else if (type_str.find("String") != std::string::npos || type_str.find("Utf8") != std::string::npos) {
-			duckdb_type = LogicalType::VARCHAR;
-		} else {
-			// Default to VARCHAR for unknown types
-			duckdb_type = LogicalType::VARCHAR;
-		}
-		
-		return_types.push_back(duckdb_type);
+	// Use DuckDB's Arrow conversion utilities to convert Arrow schema to DuckDB types
+	ArrowTableSchema arrow_table_schema;
+	auto &config = DBConfig::GetConfig(context);
+	try {
+		ArrowTableFunction::PopulateArrowTableSchema(config, arrow_table_schema, result->arrow_schema);
+	} catch (const std::exception &ex) {
+		throw InvalidInputException(std::string("Failed to convert Arrow schema: ") + ex.what());
 	}
+
+	// Get types and names from ArrowTableSchema
+	return_types = arrow_table_schema.GetTypes();
+	names = arrow_table_schema.GetNames();
 
 	return std::move(result);
 }
@@ -155,17 +141,16 @@ static unique_ptr<FunctionData> PaimonBind(ClientContext &context, TableFunction
 // Initialize global state
 static unique_ptr<GlobalTableFunctionState> PaimonInitGlobal(ClientContext &context,
                                                               TableFunctionInitInput &input) {
-	auto &bind_data = input.bind_data->Cast<PaimonBindData>();
+	auto &bind_data = const_cast<PaimonBindData&>(input.bind_data->Cast<PaimonBindData>());
 	auto result = make_uniq<PaimonGlobalState>();
 
-	// Now perform the actual scan
+	// Now perform the actual scan using PaimonTable
 	PaimonError* paimon_error = nullptr;
-	result->scan = paimon_table_scan(bind_data.catalog, bind_data.database.c_str(), bind_data.table.c_str(), &paimon_error);
+	result->scan = paimon_table_scan(bind_data.paimon_table, &paimon_error);
 	if (!result->scan) {
 		std::string error_msg = "Failed to scan Paimon table";
 		if (paimon_error) {
-			const char* msg = paimon_error_get_message(paimon_error);
-			if (msg) {
+			if (const char *msg = paimon_error_get_message(paimon_error)) {
 				error_msg += ": ";
 				error_msg += msg;
 			}
@@ -173,27 +158,21 @@ static unique_ptr<GlobalTableFunctionState> PaimonInitGlobal(ClientContext &cont
 		}
 		throw InvalidInputException(error_msg);
 	}
-	
-	result->total_batches = paimon_scan_get_batch_count(result->scan);
-	result->current_batch = 0;
 
 	// Create a connection for Arrow conversion
 	// Connection constructor needs DatabaseInstance&, not shared_ptr
 	result->connection = new Connection(*context.db);
 	auto conn_handle = reinterpret_cast<duckdb_connection>(result->connection);
 
-	// Export Arrow schema
-	result->arrow_schema.Init();
-	if (paimon_scan_export_schema(result->scan, &result->arrow_schema) != 0) {
-		throw InvalidInputException("Failed to export Arrow schema from Paimon scan");
+	if (!bind_data.arrow_schema.release) {
+		throw InvalidInputException("Arrow schema not available in bind_data");
 	}
-	result->schema_exported = true;
 
-	// Convert Arrow schema to DuckDB schema
-	duckdb_error_data error_data = duckdb_schema_from_arrow(conn_handle, &result->arrow_schema, &result->converted_schema);
+	// Convert Arrow schema to DuckDB schema using the schema from bind_data
+	duckdb_error_data error_data = duckdb_schema_from_arrow(conn_handle, &bind_data.arrow_schema, &result->converted_schema);
 	if (error_data) {
 		const char* error_msg = duckdb_error_data_message(error_data);
-		std::string msg = error_msg ? error_msg : "Failed to convert Arrow schema";
+		const std::string msg = error_msg ? error_msg : "Failed to convert Arrow schema";
 		duckdb_destroy_error_data(&error_data);
 		throw InvalidInputException(msg);
 	}
@@ -214,16 +193,13 @@ static void PaimonFunction(ClientContext &context, TableFunctionInput &data_p, D
 
 	output.Reset();
 
-	// Check if we have more batches
-	if (global_state.current_batch >= global_state.total_batches) {
-		return;
-	}
-
-	// Export Arrow array from current batch
+	// Export Arrow array from next batch
 	ArrowArray arrow_array;
 	arrow_array.Init();
-	if (paimon_scan_export_batch(global_state.scan, global_state.current_batch, &arrow_array) != 0) {
-		throw InvalidInputException("Failed to export Arrow array from Paimon batch");
+	int result = paimon_scan_export_batch(global_state.scan, &arrow_array);
+	if (result != 0) {
+		// No more batches available or error occurred
+		return;
 	}
 
 	// Convert Arrow array to DuckDB DataChunk using C API
@@ -237,7 +213,7 @@ static void PaimonFunction(ClientContext &context, TableFunctionInput &data_p, D
 	
 	if (error) {
 		const char* error_msg = duckdb_error_data_message(error);
-		std::string msg = error_msg ? error_msg : "Failed to convert Arrow array to DataChunk";
+		const std::string msg = error_msg ? error_msg : "Failed to convert Arrow array to DataChunk";
 		duckdb_destroy_error_data(&error);
 		if (arrow_array.release) {
 			arrow_array.release(&arrow_array);
@@ -246,22 +222,32 @@ static void PaimonFunction(ClientContext &context, TableFunctionInput &data_p, D
 	}
 
 	// Copy data from converted chunk to output
+	// Note: arrow_array ownership was transferred to DuckDB's DataChunk by duckdb_data_chunk_from_arrow,
+	// so we don't need to release it manually. The DataChunk will handle cleanup.
 	if (chunk) {
 		auto* converted_chunk = reinterpret_cast<DataChunk*>(chunk);
 		output.Move(*converted_chunk);
 		duckdb_destroy_data_chunk(&chunk);
 	}
-
-	// Advance to next batch
-	global_state.current_batch++;
 }
 
 static void LoadInternal(ExtensionLoader &loader) {
-	// Register table function: paimon_read(warehouse_path, database, table)
-	TableFunction paimon_read("paimon_read",
-	                          {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
-	                          PaimonFunction, PaimonBind, PaimonInitGlobal, PaimonInitLocal);
-	loader.RegisterFunction(paimon_read);
+	// Register table function: paimon_read(warehouse_path, table) or paimon_read(warehouse_path, database, table)
+	TableFunctionSet paimon_read_set("paimon_read");
+	
+	// 2 parameters: warehouse_path, table (database defaults to "default")
+	TableFunction paimon_read_2("paimon_read",
+	                             {LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                             PaimonFunction, PaimonBind, PaimonInitGlobal, PaimonInitLocal);
+	paimon_read_set.AddFunction(paimon_read_2);
+	
+	// 3 parameters: warehouse_path, database, table
+	TableFunction paimon_read_3("paimon_read",
+	                             {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                             PaimonFunction, PaimonBind, PaimonInitGlobal, PaimonInitLocal);
+	paimon_read_set.AddFunction(paimon_read_3);
+	
+	loader.RegisterFunction(paimon_read_set);
 }
 
 void PaimonExtension::Load(ExtensionLoader &loader) {
