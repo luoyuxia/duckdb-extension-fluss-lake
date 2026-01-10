@@ -136,7 +136,7 @@ if(RUST_BUILD_ENABLED)
         OUTPUT_STRIP_TRAILING_WHITESPACE
     )
     
-    # Try to find Rust sysroot
+    # Try to find Rust sysroot and standard library
     execute_process(
         COMMAND rustc --print sysroot
         OUTPUT_VARIABLE RUST_SYSROOT
@@ -146,6 +146,30 @@ if(RUST_BUILD_ENABLED)
     
     if(RUST_SYSROOT)
         message(STATUS "Rust sysroot: ${RUST_SYSROOT}")
+        
+        # Find Rust target triple
+        execute_process(
+            COMMAND rustc -vV
+            OUTPUT_VARIABLE RUSTC_VERSION_OUTPUT
+            ERROR_QUIET
+        )
+        
+        # Extract host target from rustc output
+        string(REGEX MATCH "host: ([^ ]+)" _ "${RUSTC_VERSION_OUTPUT}")
+        if(CMAKE_MATCH_1)
+            set(RUST_TARGET_TRIPLE ${CMAKE_MATCH_1})
+            message(STATUS "Rust target triple: ${RUST_TARGET_TRIPLE}")
+        endif()
+        
+        # Set Rust library search paths for Linux
+        if(UNIX AND NOT APPLE)
+            # On Linux, we may need to link against Rust standard library
+            # The static library from Rust should be self-contained, but we'll set up paths just in case
+            set(RUST_LIB_DIR "${RUST_SYSROOT}/lib/rustlib/${RUST_TARGET_TRIPLE}/lib")
+            if(EXISTS "${RUST_LIB_DIR}")
+                message(STATUS "Found Rust lib directory: ${RUST_LIB_DIR}")
+            endif()
+        endif()
     endif()
 endif()
 
@@ -164,7 +188,10 @@ if(COMMAND build_static_extension)
     if(RUST_BUILD_ENABLED)
         target_link_libraries(${EXTENSION_NAME} ${PAIMON_FFI_TARGET_NAME})
         target_link_libraries(${LOADABLE_EXTENSION_NAME} ${PAIMON_FFI_TARGET_NAME})
+        
+        # Platform-specific linking for Rust dependencies
         if(APPLE)
+            # macOS requires Security and CoreFoundation frameworks for some Rust crates
             target_link_libraries(${EXTENSION_NAME}
                 "-framework Security"
                 "-framework CoreFoundation"
@@ -173,6 +200,12 @@ if(COMMAND build_static_extension)
                 "-framework Security"
                 "-framework CoreFoundation"
             )
+        elseif(UNIX AND NOT APPLE)
+            # Linux: Rust static libraries should be self-contained, but may need pthread
+            # Most modern Rust staticlibs include everything needed
+            # If linking issues occur, you may need to add: -lpthread -ldl -lm
+            # For now, we rely on the static library being self-contained
+            message(STATUS "Linking Rust FFI library for Linux")
         endif()
     endif()
     
@@ -211,39 +244,241 @@ else()
     target_link_libraries(${EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto)
     if(RUST_BUILD_ENABLED)
         target_link_libraries(${EXTENSION_NAME} ${PAIMON_FFI_TARGET_NAME})
-        # Link Rust standard library and other dependencies
+        # Platform-specific linking for Rust dependencies
         if(APPLE)
             target_link_libraries(${EXTENSION_NAME} 
                 "-framework Security"
                 "-framework CoreFoundation"
             )
+        elseif(UNIX AND NOT APPLE)
+            # Linux: Rust static libraries should be self-contained
+            message(STATUS "Linking Rust FFI library for Linux (static)")
         endif()
     endif()
     
     # Build loadable extension (simplified version for standalone build)
-    add_library(${LOADABLE_EXTENSION_NAME} SHARED ${EXTENSION_SOURCES})
-    target_link_libraries(${LOADABLE_EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto)
+    # First build as a shared library without .duckdb_extension suffix
+    add_library(${LOADABLE_EXTENSION_NAME}_raw SHARED ${EXTENSION_SOURCES})
+    target_link_libraries(${LOADABLE_EXTENSION_NAME}_raw OpenSSL::SSL OpenSSL::Crypto)
     if(RUST_BUILD_ENABLED)
-        target_link_libraries(${LOADABLE_EXTENSION_NAME} ${PAIMON_FFI_TARGET_NAME})
-        # Link Rust standard library and other dependencies
+        target_link_libraries(${LOADABLE_EXTENSION_NAME}_raw ${PAIMON_FFI_TARGET_NAME})
+        # Platform-specific linking for Rust dependencies
         if(APPLE)
-            target_link_libraries(${LOADABLE_EXTENSION_NAME}
+            target_link_libraries(${LOADABLE_EXTENSION_NAME}_raw
                 "-framework Security"
                 "-framework CoreFoundation"
             )
+        elseif(UNIX AND NOT APPLE)
+            # Linux: Rust static libraries should be self-contained
+            message(STATUS "Linking Rust FFI library for Linux (shared)")
         endif()
     endif()
-    set_target_properties(${LOADABLE_EXTENSION_NAME} PROPERTIES
+    
+    # Set output name based on platform
+    if(APPLE)
+        set(RAW_LIB_NAME "lib${TARGET_NAME}.dylib")
+    elseif(UNIX)
+        set(RAW_LIB_NAME "lib${TARGET_NAME}.so")
+    else()
+        set(RAW_LIB_NAME "${TARGET_NAME}.dll")
+    endif()
+    
+    set_target_properties(${LOADABLE_EXTENSION_NAME}_raw PROPERTIES
         OUTPUT_NAME ${TARGET_NAME}
-        PREFIX ""
-        SUFFIX ".duckdb_extension"
+        PREFIX "lib"
     )
-    target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE DUCKDB_BUILD_LOADABLE_EXTENSION)
+    target_compile_definitions(${LOADABLE_EXTENSION_NAME}_raw PRIVATE DUCKDB_BUILD_LOADABLE_EXTENSION)
     
     # On macOS, use undefined dynamic lookup for loadable extensions
     if(APPLE)
-        set_target_properties(${LOADABLE_EXTENSION_NAME} PROPERTIES
+        set_target_properties(${LOADABLE_EXTENSION_NAME}_raw PROPERTIES
             LINK_FLAGS "-undefined dynamic_lookup"
         )
     endif()
+    
+    # Find Python for metadata script
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(NOT Python3_FOUND)
+        find_program(PYTHON3 python3 python)
+    else()
+        set(PYTHON3 ${Python3_EXECUTABLE})
+    endif()
+    
+    
+    # Get extension version from git
+    find_package(Git QUIET)
+    if(GIT_FOUND)
+        execute_process(
+            COMMAND ${GIT_EXECUTABLE} tag --points-at HEAD
+            OUTPUT_VARIABLE GIT_TAG
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            ERROR_QUIET
+        )
+        if(GIT_TAG)
+            set(EXTENSION_VERSION ${GIT_TAG})
+        else()
+            execute_process(
+                COMMAND ${GIT_EXECUTABLE} --no-pager log -1 --format=%h
+                OUTPUT_VARIABLE GIT_HASH
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+                ERROR_QUIET
+            )
+            if(GIT_HASH)
+                set(EXTENSION_VERSION ${GIT_HASH})
+            else()
+                set(EXTENSION_VERSION "dev")
+            endif()
+        endif()
+    else()
+        set(EXTENSION_VERSION "dev")
+    endif()
+    
+    # Detect platform using Python script or fallback
+    set(PLATFORM_DETECTED FALSE)
+    if(PYTHON3)
+        # Try to detect platform using DuckDB Python package
+        execute_process(
+            COMMAND ${PYTHON3} -c "import duckdb; print(duckdb.execute('pragma platform').fetchone()[0])"
+            OUTPUT_VARIABLE DUCKDB_PLATFORM
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+        )
+        if(DUCKDB_PLATFORM)
+            set(PLATFORM_DETECTED TRUE)
+        endif()
+    endif()
+    
+    # Fallback platform detection based on CMake variables
+    if(NOT PLATFORM_DETECTED)
+        if(APPLE)
+            if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
+                set(DUCKDB_PLATFORM "osx_arm64")
+            else()
+                set(DUCKDB_PLATFORM "osx_amd64")
+            endif()
+        elseif(UNIX)
+            if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
+                set(DUCKDB_PLATFORM "linux_arm64")
+            else()
+                set(DUCKDB_PLATFORM "linux_amd64")
+            endif()
+        else()
+            set(DUCKDB_PLATFORM "windows_amd64")
+        endif()
+    endif()
+    
+    # Detect DuckDB version for CPP ABI (must match exactly)
+    # Try multiple methods to detect the actual DuckDB version being used
+    if(NOT DEFINED DUCKDB_VERSION)
+        set(DUCKDB_VERSION_DETECTED FALSE)
+        
+        # Method 1: Try to get from Python DuckDB package
+        if(PYTHON3)
+            execute_process(
+                COMMAND ${PYTHON3} -c "import duckdb; conn = duckdb.connect(); result = conn.execute('SELECT library_version FROM pragma_version()').fetchone(); print(result[0] if result else '')"
+                OUTPUT_VARIABLE DUCKDB_LIB_VERSION
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                ERROR_QUIET
+            )
+            if(DUCKDB_LIB_VERSION AND NOT DUCKDB_LIB_VERSION STREQUAL "")
+                set(DUCKDB_VERSION ${DUCKDB_LIB_VERSION})
+                set(DUCKDB_VERSION_DETECTED TRUE)
+                message(STATUS "Detected DuckDB version from Python: ${DUCKDB_VERSION}")
+            endif()
+        endif()
+        
+        # Method 2: Try to get from DuckDB source directory if available
+        if(NOT DUCKDB_VERSION_DETECTED AND EXISTS "${DUCKDB_DIR}")
+            # Try to read version from DuckDB's version file or git
+            find_package(Git QUIET)
+            if(GIT_FOUND)
+                execute_process(
+                    COMMAND ${GIT_EXECUTABLE} describe --tags --exact-match HEAD
+                    OUTPUT_VARIABLE DUCKDB_GIT_TAG
+                    OUTPUT_STRIP_TRAILING_WHITESPACE
+                    WORKING_DIRECTORY ${DUCKDB_DIR}
+                    ERROR_QUIET
+                )
+                if(DUCKDB_GIT_TAG AND NOT DUCKDB_GIT_TAG STREQUAL "")
+                    set(DUCKDB_VERSION ${DUCKDB_GIT_TAG})
+                    set(DUCKDB_VERSION_DETECTED TRUE)
+                    message(STATUS "Detected DuckDB version from git tag: ${DUCKDB_VERSION}")
+                else()
+                    # Try to get version from git describe
+                    execute_process(
+                        COMMAND ${GIT_EXECUTABLE} describe --tags --abbrev=0
+                        OUTPUT_VARIABLE DUCKDB_GIT_TAG
+                        OUTPUT_STRIP_TRAILING_WHITESPACE
+                        WORKING_DIRECTORY ${DUCKDB_DIR}
+                        ERROR_QUIET
+                    )
+                    if(DUCKDB_GIT_TAG AND NOT DUCKDB_GIT_TAG STREQUAL "")
+                        set(DUCKDB_VERSION ${DUCKDB_GIT_TAG})
+                        set(DUCKDB_VERSION_DETECTED TRUE)
+                        message(STATUS "Detected DuckDB version from git describe: ${DUCKDB_VERSION}")
+                    endif()
+                endif()
+            endif()
+        endif()
+        
+        # Default DuckDB version if not detected
+        # Note: For CPP ABI, version must match exactly with the DuckDB version you're using
+        if(NOT DUCKDB_VERSION_DETECTED)
+            # Try to get version from installed DuckDB if available
+            # This is a fallback - user should ideally specify the version
+            set(DUCKDB_VERSION "v1.4.2" CACHE STRING "DuckDB version for extension metadata (for CPP ABI)")
+            message(WARNING "Could not auto-detect DuckDB version!")
+            message(WARNING "  Using default: ${DUCKDB_VERSION}")
+            message(WARNING "  If this doesn't match your DuckDB version, specify with:")
+            message(WARNING "    cmake .. -DDUCKDB_VERSION=v1.4.2")
+            message(WARNING "  Or check your DuckDB version with: python3 -c 'import duckdb; print(duckdb.__version__)'")
+        endif()
+    else()
+        set(DUCKDB_VERSION ${DUCKDB_VERSION} CACHE STRING "DuckDB version for extension metadata (for CPP ABI)")
+        message(STATUS "Using manually specified DuckDB version: ${DUCKDB_VERSION}")
+    endif()
+    
+    message(STATUS "DuckDB Platform: ${DUCKDB_PLATFORM}")
+    message(STATUS "DuckDB Version: ${DUCKDB_VERSION}")
+    message(STATUS "Extension Version: ${EXTENSION_VERSION}")
+    
+    # Create the final extension file with metadata
+    set(EXTENSION_OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${TARGET_NAME}.duckdb_extension)
+    
+    if(PYTHON3)
+        # Use the append_extension_metadata.py script
+        # Use generator expression to get the actual file path
+        # Since we're using DUCKDB_CPP_EXTENSION_ENTRY, we need CPP ABI type
+        # For CPP ABI, -dv should be the DuckDB version (not C API version)
+        
+        add_custom_command(
+            OUTPUT ${EXTENSION_OUTPUT}
+            DEPENDS ${LOADABLE_EXTENSION_NAME}_raw
+            COMMAND ${PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/extension-ci-tools/scripts/append_extension_metadata.py
+                -l $<TARGET_FILE:${LOADABLE_EXTENSION_NAME}_raw>
+                -o ${EXTENSION_OUTPUT}
+                -n ${TARGET_NAME}
+                -dv ${DUCKDB_VERSION}
+                -ev ${EXTENSION_VERSION}
+                -p ${DUCKDB_PLATFORM}
+                --abi-type CPP
+            COMMENT "Appending metadata to extension file (DuckDB version: ${DUCKDB_VERSION}, ABI: CPP)"
+            VERBATIM
+        )
+    else()
+        # Fallback: just copy the library (will not work, but at least builds)
+        message(WARNING "Python not found. Extension will be built without metadata (may not load correctly).")
+        add_custom_command(
+            OUTPUT ${EXTENSION_OUTPUT}
+            DEPENDS ${LOADABLE_EXTENSION_NAME}_raw
+            COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:${LOADABLE_EXTENSION_NAME}_raw> ${EXTENSION_OUTPUT}
+            COMMENT "Copying extension file (without metadata - may not work)"
+            VERBATIM
+        )
+    endif()
+    
+    # Create a custom target for the extension with metadata
+    add_custom_target(${LOADABLE_EXTENSION_NAME} ALL DEPENDS ${EXTENSION_OUTPUT})
 endif()
