@@ -1,115 +1,135 @@
 # DuckDB Paimon Extension
 
-这是一个基于 [paimon-rust](https://github.com/apache/paimon-rust) 的 DuckDB extension，允许在 DuckDB 中直接读取 Apache Paimon 表。
+A DuckDB extension based on [paimon-rust](https://github.com/apache/paimon-rust) that allows reading Apache Paimon tables directly in DuckDB.
 
-## ⚠️ 实验性状态（Experimental Status）
+## ⚠️ Experimental Status
 
-**本扩展目前处于实验性阶段**，正在积极开发中。请注意：
+**This extension is currently in experimental stage** and under active development. Please note:
 
-- 🔬 **功能限制**：当前仅支持日志表和开启了 Deletion Vector 的主键表
-- 🐛 **可能不稳定**：可能存在 bug 或性能问题
-- 📝 **API 可能变化**：接口和功能可能会在后续版本中发生变化
-- ⚡ **不建议用于生产环境**：请谨慎使用，建议先在测试环境中验证
+- 🔬 **Feature Limitations**: Currently only supports log tables and primary key tables with Deletion Vector enabled
+- 🐛 **May be unstable**: May contain bugs or performance issues
+- 📝 **API may change**: Interfaces and features may change in future versions
+- ⚡ **Not recommended for production**: Use with caution, please test in a test environment first
 
-如果你遇到问题或有改进建议，欢迎提交 Issue 或 Pull Request。
+If you encounter issues or have suggestions for improvement, please feel free to submit an Issue or Pull Request.
 
-## 获取项目
+## Getting Started
 
-### 克隆项目（推荐方式）
+### Clone the Project (Recommended)
 
-项目使用了 Git Submodules，需要同时克隆主项目和子模块：
+The project uses Git Submodules, so you need to clone both the main project and submodules:
 
 ```bash
-# 方式 1: 克隆时同时初始化 submodules（推荐）
+# Method 1: Clone with submodules initialized (recommended)
 git clone --recurse-submodules <repository-url>
 cd duckdb-extension-paimon
 
-# 方式 2: 如果已经克隆了项目，需要初始化 submodules
+# Method 2: If you've already cloned the project, initialize submodules
 git clone <repository-url>
 cd duckdb-extension-paimon
 git submodule update --init --recursive
 ```
 
-### 更新 Submodules
+### Update Submodules
 
-如果项目更新了，可能需要更新 submodules：
+If the project is updated, you may need to update submodules:
 
 ```bash
 git submodule update --remote --recursive
 ```
 
-**重要提示**：项目包含以下 submodules：
-- `duckdb/` - DuckDB 源代码（必需，用于构建扩展）
-- `extension-ci-tools/` - DuckDB 扩展构建工具（必需，用于构建和打包）
+**Important**: The project contains the following submodules:
+- `duckdb/` - DuckDB source code (required for building the extension)
+- `extension-ci-tools/` - DuckDB extension build tools (required for building and packaging)
 
-如果没有正确初始化 submodules，构建会失败。
+If submodules are not properly initialized, the build will fail.
 
-## 项目结构
+## Project Structure
 
 ```
 duckdb-extension-paimon/
-├── rust-ffi/              # Rust FFI 包装层
+├── rust-ffi/              # Rust FFI wrapper layer
 │   ├── Cargo.toml
 │   └── src/
-│       └── lib.rs         # C ABI 接口
+│       └── lib.rs         # C ABI interface
 ├── src/
 │   ├── include/
 │   │   ├── paimon_extension.hpp
-│   │   └── paimon_ffi.h   # C++ FFI 头文件
-│   └── paimon_extension.cpp  # DuckDB extension 实现
+│   │   └── paimon_ffi.h   # C++ FFI header
+│   └── paimon_extension.cpp  # DuckDB extension implementation
 ├── CMakeLists.txt
 └── extension_config.cmake
 ```
 
-## 构建要求
+## Build Requirements
 
-1. **Rust 工具链**: 需要安装 Rust 和 Cargo
+1. **Rust toolchain**: Rust and Cargo need to be installed
    ```bash
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
    ```
 
 2. **CMake 3.10+**
 
-3. **DuckDB 源代码**: 需要 DuckDB 的头文件
-   - 项目通过 Git Submodule 包含 `duckdb/` 目录
-   - 克隆项目时务必使用 `--recurse-submodules` 或运行 `git submodule update --init --recursive`
-   - 如果 `duckdb/` 子目录存在，构建系统会自动检测
-   - 否则需要设置 `DUCKDB_DIR` CMake 变量指向 DuckDB 源码目录
+3. **DuckDB source code**: DuckDB headers are required
+   - The project includes the `duckdb/` directory via Git Submodule
+   - When cloning, make sure to use `--recurse-submodules` or run `git submodule update --init --recursive`
+   - If the `duckdb/` subdirectory exists, the build system will auto-detect it
+   - Otherwise, you need to set the `DUCKDB_DIR` CMake variable to point to the DuckDB source directory
 
-4. **paimon-rust**: 依赖会自动从 GitHub 仓库下载
-   - 使用 `https://github.com/luoyuxia/paimon-rust` 的 `poc` 分支
-   - 首次构建时会自动下载依赖
+4. **paimon-rust**: Dependencies will be automatically downloaded from GitHub repository
+   - Uses the `poc` branch from `https://github.com/luoyuxia/paimon-rust`
+   - Dependencies will be automatically downloaded on first build
 
-## 支持的平台
+## Supported Platforms
 
-✅ **macOS** (Apple Silicon 和 Intel)  
-✅ **Linux** (x86_64 和 ARM64)
+✅ **macOS** (Apple Silicon and Intel)  
+✅ **Linux** (x86_64 and ARM64)
 
-构建系统会自动检测平台并配置相应的链接选项。
+The build system will automatically detect the platform and configure the appropriate linking options.
 
-## 构建步骤
+## Quick Start (Using Pre-built Extension)
 
-### 使用构建脚本（推荐）
+If you're using **macOS** and **DuckDB 1.4.2**, you can directly download the pre-built extension without manual building:
 
-最简单的方式是使用提供的构建脚本，它会在 macOS 和 Linux 上自动工作：
+```bash
+# Download pre-built extension
+curl -L -o paimon.duckdb_extension \
+  https://github.com/luoyuxia/duckdb-extension-paimon/releases/download/0.0.1-beta/paimon.duckdb_extension
+
+# Load in DuckDB
+duckdb -unsigned
+# Then in the DuckDB shell, execute:
+LOAD '/path/to/paimon.duckdb_extension';
+```
+
+**Important Notes**:
+- ⚠️ Pre-built extension is only for **macOS** systems
+- ⚠️ Only tested with **DuckDB 1.4.2**, other versions may not be compatible
+- ⚠️ If you need Linux version or extensions for other DuckDB versions, please refer to the build steps below to build manually
+
+## Build Steps
+
+### Using Build Script (Recommended)
+
+The easiest way is to use the provided build script, which works automatically on both macOS and Linux:
 
 ```bash
 ./build.sh
 ```
 
-**更新依赖**：如果 `paimon-rust` 的 `poc` 分支更新了，需要更新依赖：
+**Update Dependencies**: If the `poc` branch of `paimon-rust` is updated, you need to update dependencies:
 
 ```bash
 ./build.sh --update-deps
-# 或者简写
+# or shorthand
 ./build.sh -u
 ```
 
-这会运行 `cargo update` 来获取最新的依赖代码。
+This will run `cargo update` to fetch the latest dependency code.
 
-### 手动命令行构建
+### Manual Command Line Build
 
-#### macOS 和 Linux
+#### macOS and Linux
 
 ```bash
 mkdir build && cd build
@@ -117,62 +137,60 @@ cmake .. -DCMAKE_BUILD_TYPE=Release
 cmake --build . --config Release
 ```
 
-**注意**：如果遇到版本不匹配的错误，需要指定正确的 DuckDB 版本：
+**Note**: If you encounter version mismatch errors, you need to specify the correct DuckDB version:
 
 ```bash
-# 首先检查你的 DuckDB 版本
+# First check your DuckDB version
 python3 -c "import duckdb; conn = duckdb.connect(); print(conn.execute('SELECT library_version FROM pragma_version()').fetchone()[0])"
 
-# 然后使用该版本构建扩展
+# Then build the extension with that version
 cmake .. -DCMAKE_BUILD_TYPE=Release -DDUCKDB_VERSION=v1.4.2
 ```
 
-对于 CPP ABI，版本必须与使用的 DuckDB 版本完全匹配。构建系统会尝试自动检测，但如果检测失败，你需要手动指定。
+For CPP ABI, the version must exactly match the DuckDB version you're using. The build system will try to auto-detect, but if detection fails, you need to specify it manually.
 
-构建完成后，你会在 `build/` 目录下找到：
-- `paimon.duckdb_extension` - 可加载的扩展文件
-- `libpaimon_extension.a` - 静态库文件
+After building, you'll find in the `build/` directory:
+- `paimon.duckdb_extension` - Loadable extension file
+- `libpaimon_extension.a` - Static library file
 
-## 使用方法
+## Usage
 
-加载 extension 后，可以使用 `paimon_read` table function 来读取 Paimon 表：
+After loading the extension, you can use the `paimon_read` table function to read Paimon tables:
 
 ```sql
--- 加载 extension
+-- Load extension
 LOAD 'paimon';
 
--- 读取 Paimon 表
--- 支持日志表和开启了 Deletion Vector 的主键表
+-- Read Paimon table
+-- Supports log tables and primary key tables with Deletion Vector enabled
 SELECT * FROM paimon_read('/path/to/warehouse', 'database_name', 'table_name');
 ```
 
-**注意**：当前仅支持日志表和开启了 Deletion Vector 的主键表。如果尝试读取不支持的表类型，可能会遇到错误。
+**Note**: Currently only supports log tables and primary key tables with Deletion Vector enabled. If you try to read unsupported table types, you may encounter errors.
 
-## 当前状态
+## Current Status
 
-✅ 已完成：
-- Rust FFI 包装层
-- CMake 构建配置
-- DuckDB Table Function 框架
-- 基本的类型映射
+✅ Completed:
+- Rust FFI wrapper layer
+- CMake build configuration
+- DuckDB Table Function framework
+- Basic type mapping
 
-### 支持的表类型
+### Supported Table Types
 
-当前扩展支持以下 Paimon 表类型：
+The extension currently supports the following Paimon table types:
 
-- ✅ **日志表（Log Table）**
-- ✅ **主键表（Primary Key Table）**：仅支持开启了 Deletion Vector 的主键表
+- ✅ **Log Table**
+- ✅ **Primary Key Table**: Only supports primary key tables with Deletion Vector enabled
 
-⚠️ **不支持**：
-- 未开启 Deletion Vector 的主键表
+⚠️ **Not Supported**:
+- Primary key tables without Deletion Vector enabled
 
-## 注意事项
+## Notes
 
-1. **Git 依赖**: Rust FFI 依赖从 GitHub 仓库获取，使用 `poc` 分支。如果需要修改，请编辑 `rust-ffi/Cargo.toml`
+1. **Git Dependencies**: Rust FFI dependencies are fetched from GitHub repository, using the `poc` branch. If you need to modify, edit `rust-ffi/Cargo.toml`
 
-2. **依赖更新**: Cargo 会锁定依赖版本到 `Cargo.lock` 文件中。如果 `paimon-rust` 的 `poc` 分支更新了：
-   - 使用 `./build.sh --update-deps` 自动更新
-   - 或手动运行 `cd rust-ffi && cargo update`
-   - 或删除 `rust-ffi/Cargo.lock` 让 Cargo 重新解析依赖
-
-
+2. **Dependency Updates**: Cargo locks dependency versions in the `Cargo.lock` file. If the `poc` branch of `paimon-rust` is updated:
+   - Use `./build.sh --update-deps` to update automatically
+   - Or manually run `cd rust-ffi && cargo update`
+   - Or delete `rust-ffi/Cargo.lock` to let Cargo re-resolve dependencies
