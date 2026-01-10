@@ -8,7 +8,11 @@ name = "paimon_ffi"
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
-paimon = { path = "../../../rust-projects/paimon-rust/crates/paimon" }
+# 从 GitHub 仓库的 poc 分支获取 paimon crate
+# 如果 paimon crate 在 workspace 的子目录中（如 crates/paimon），Cargo 会自动查找
+# 如果遇到问题，可以尝试添加 package 参数：
+# paimon = { git = "https://github.com/luoyuxia/paimon-rust", branch = "poc", package = "paimon" }
+paimon = { git = "https://github.com/luoyuxia/paimon-rust", branch = "poc" }
 tokio = { version = "1.39", features = ["full"] }
 arrow-array = "55"
 arrow-schema = "55"
