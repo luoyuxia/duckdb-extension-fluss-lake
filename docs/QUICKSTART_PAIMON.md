@@ -234,26 +234,43 @@ You can use `tree /tmp/paimon` to see the paimon warehouse directory structure.
 
 ## Step 5: Query Data with DuckDB
 
-### 5.1 Load DuckDB Fluss Extension
+### 5.1 Download and Prepare DuckDB Fluss Extension
+
+Download the pre-built Fluss extension:
+
+```bash
+# Download the extension
+wget https://github.com/luoyuxia/duckdb-extension-fluss-lake/releases/download/0.1.1-beta/fluss.duckdb_extension.gz
+
+# Extract the extension
+gunzip fluss.duckdb_extension.gz
+
+# Verify the extension file exists
+ls -lh fluss.duckdb_extension
+```
+
+### 5.2 Load DuckDB Fluss Extension
 
 Start DuckDB and load the Fluss extension:
 
 ```bash
-# Or start with unsigned extensions allowed
+# Start DuckDB with unsigned extensions allowed
 duckdb -unsigned
 ```
 
 In DuckDB, load the extension:
 
 ```sql
--- Load the Fluss extension
-LOAD '/Users/yuxia/Projects/cpp-projects/duckdb-extension-fluss-lake/build/fluss.duckdb_extension';
+-- Load the Fluss extension (use the path where you downloaded/extracted it)
+LOAD '/path/to/fluss.duckdb_extension';
 
 -- Verify extension is loaded
 SELECT extension_name FROM duckdb_extensions() WHERE extension_name = 'fluss';
 ```
 
-### 5.2 Query Fluss Table
+**Note**: Replace `/path/to/fluss.duckdb_extension` with the actual path where you downloaded and extracted the extension file.
+
+### 5.3 Query Fluss Table
 
 Query the Fluss table using the `fluss_read` table function:
 
@@ -292,7 +309,7 @@ SELECT COUNT(*) as total_rows FROM fluss_data;
 - `database`: Database name (defaults to `'fluss'` if omitted)
 - `table`: Table name (must be a Paimon append-only table with filesystem catalog)
 
-### 5.3 Verify Data Freshness
+### 5.4 Verify Data Freshness
 
 The extension automatically combines:
 1. **Historical data** from Paimon lake storage (up to the last snapshot)

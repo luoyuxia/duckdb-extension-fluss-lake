@@ -163,7 +163,7 @@ After loading the extension, you can use the `fluss_read` table function to read
 
 ```sql
 -- Load extension
-LOAD 'fluss';
+LOAD 'path/to/fluss.duckdb_extension';
 
 -- Read table with Fluss streaming (currently supports Paimon append-only tables)
 -- Syntax: fluss_read(bootstrap_server, database, table)
