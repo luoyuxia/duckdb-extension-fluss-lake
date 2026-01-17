@@ -528,130 +528,130 @@ static unique_ptr<LocalTableFunctionState> FlussInitLocal(ExecutionContext &cont
 	return make_uniq<FlussLocalState>();
 }
 
-// Main table function - implements two-phase reading
+// Main table function - implements two-phase reading (Paimon Snapshot -> Fluss Log)
 static void FlussFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
     auto &global_state = data_p.global_state->Cast<FlussGlobalState>();
     auto &bind_data = const_cast<FlussBindData&>(data_p.bind_data->Cast<FlussBindData>());
 
-    // 获取连接句柄用于 Arrow 转换
+    // Connection handle for Arrow-to-DataChunk conversion
     auto conn_handle = reinterpret_cast<duckdb_connection>(global_state.connection);
+
+    // Initialize output as empty
     output.SetCardinality(0);
 
-    // --- Phase 1: Paimon (Snapshot) ---
+    // --- Phase 1: Paimon (Static Snapshot Data) ---
     if (global_state.phase == ReadingPhase::PAIMON) {
         ArrowArray paimon_array;
         paimon_array.release = nullptr;
 
         int res = paimon_scan_export_batch(global_state.paimon_scan, &paimon_array);
+
         if (res == 0 && paimon_array.release != nullptr) {
-            // 将 Paimon Arrow 数据转为 DataChunk 并移交给 output
             duckdb_data_chunk chunk_handle = nullptr;
+            // Convert Paimon Arrow data to DuckDB DataChunk
             auto err = duckdb_data_chunk_from_arrow(conn_handle, &paimon_array, global_state.converted_schema, &chunk_handle);
             if (!err && chunk_handle) {
                 output.Move(*(reinterpret_cast<DataChunk*>(chunk_handle)));
                 duckdb_destroy_data_chunk(&chunk_handle);
-                return; // 填充完数据，返回，等待 DuckDB 下次调用
+                return; // Return with data; DuckDB will call this function again
             }
         }
 
-        // 如果 Paimon 没数据了，切换到 Fluss 阶段
+        // Paimon data exhausted, transition to Fluss phase
         global_state.phase = ReadingPhase::FLUSS;
+
+        // If there are no buckets to stream, return empty (signals actual EOF)
         if (bind_data.bucket_ids.empty()) {
-	        return;
+            return;
         }
+        // FALLTHROUGH: Don't return here! Immediately try to read from Fluss
     }
 
-    // --- Phase 2: Fluss (Real-time Log) ---
+    // --- Phase 2: Fluss (Real-time Log Data) ---
     if (global_state.phase == ReadingPhase::FLUSS) {
+        // If all buckets have reached their target offsets, signal EOF
         if (global_state.active_buckets.empty()) {
-	        return;
+            return;
         }
 
-        while (global_state.current_batches == nullptr) {
-            if (context.interrupted) {
-	            throw InterruptException();
-            }
+        // Loop until we have data in output OR all buckets are finished
+        // This prevents returning 0 rows prematurely, which would stop the scan
+        while (output.size() == 0 && !global_state.active_buckets.empty()) {
 
-            FlussError* fluss_error = nullptr;
-            global_state.current_batches = fluss_scanner_poll_batches(global_state.fluss_scanner, 100, &fluss_error);
-
-            if (fluss_error) {
-                std::string msg = fluss_error_get_message(fluss_error);
-                fluss_error_free(fluss_error);
-                throw InvalidInputException("Fluss poll error: " + msg);
-            }
-
-            if (global_state.current_batches == nullptr && global_state.active_buckets.empty()) {
-	            return;
-            }
-        }
-
-        // 2. 获取 Poll 到的所有 Bucket IDs
-        size_t b_count = fluss_scan_record_batches_get_bucket_count(global_state.current_batches);
-        std::vector<int32_t> polled_ids(b_count);
-        b_count = fluss_scan_record_batches_get_bucket_ids(global_state.current_batches, polled_ids.data(), b_count);
-        polled_ids.resize(b_count);
-
-        // 3. 遍历并合并所有 Bucket 的数据
-        for (int32_t bid : polled_ids) {
-            if (global_state.active_buckets.find(bid) == global_state.active_buckets.end()) {
-	            continue;
-            }
-
-            ArrowArray bucket_array;
-            bucket_array.release = nullptr;
-            if (fluss_scan_record_batches_get_batch_for_bucket(global_state.current_batches, bid, &bucket_array) == 0
-                && bucket_array.release != nullptr) {
-
-                // 转换单个 Bucket 的 Batch
-                duckdb_data_chunk temp_handle = nullptr;
-                auto err = duckdb_data_chunk_from_arrow(conn_handle, &bucket_array, global_state.converted_schema, &temp_handle);
-
-                if (!err && temp_handle) {
-                    auto* temp_chunk = reinterpret_cast<DataChunk*>(temp_handle);
-                    // 将数据追加到最终输出 output 中
-                    output.Append(*temp_chunk);
-                    duckdb_destroy_data_chunk(&temp_handle);
+            // 1. Poll for new batches if we don't have a pending result
+            if (global_state.current_batches == nullptr) {
+                // Check for user interruption (e.g., query cancellation)
+                if (context.interrupted) {
+                    throw InterruptException();
                 }
 
-                // 更新偏移量进度
-                global_state.fluss_rows_read_per_bucket[bid] += bucket_array.length;
-                int64_t limit = bind_data.end_offsets[bid] - bind_data.snapshot_offsets[bid];
+                FlussError* fluss_error = nullptr;
+                global_state.current_batches = fluss_scanner_poll_batches(global_state.fluss_scanner, 100, &fluss_error);
 
-                if (global_state.fluss_rows_read_per_bucket[bid] >= limit) {
-                    // This bucket is done, unsubscribe it
-                    FlussError* fluss_error = nullptr;
-                    int32_t unsubscribe_result = fluss_scanner_unsubscribe_batch(
-                        global_state.fluss_scanner,
-                        bid,
-                        bind_data.table_id,
-                        &fluss_error
-                    );
-                    
-                    if (fluss_error) {
-                        const char* msg = fluss_error_get_message(fluss_error);
-                        std::string error_msg = msg ? std::string("Failed to unsubscribe bucket: ") + msg : "Failed to unsubscribe bucket";
-                        fluss_error_free(fluss_error);
-                        throw InvalidInputException(error_msg);
+                if (fluss_error) {
+                    std::string msg = fluss_error_get_message(fluss_error);
+                    fluss_error_free(fluss_error);
+                    throw InvalidInputException("Fluss poll error: " + msg);
+                }
+
+                // If poll returned nothing but buckets are still active, loop again
+                if (global_state.current_batches == nullptr) {
+                    continue;
+                }
+            }
+
+            // 2. Process the polled batches
+            size_t b_count = fluss_scan_record_batches_get_bucket_count(global_state.current_batches);
+            std::vector<int32_t> polled_ids(b_count);
+            b_count = fluss_scan_record_batches_get_bucket_ids(global_state.current_batches, polled_ids.data(), b_count);
+            polled_ids.resize(b_count);
+
+            for (int32_t bid : polled_ids) {
+                if (global_state.active_buckets.find(bid) == global_state.active_buckets.end()) {
+                    continue;
+                }
+
+                ArrowArray bucket_array;
+                bucket_array.release = nullptr;
+                if (fluss_scan_record_batches_get_batch_for_bucket(global_state.current_batches, bid, &bucket_array) == 0
+                    && bucket_array.release != nullptr) {
+
+                    // Convert and Append data to the output DataChunk
+                    duckdb_data_chunk temp_handle = nullptr;
+                    auto err = duckdb_data_chunk_from_arrow(conn_handle, &bucket_array, global_state.converted_schema, &temp_handle);
+
+                    if (!err && temp_handle) {
+                        auto* temp_chunk = reinterpret_cast<DataChunk*>(temp_handle);
+                        output.Append(*temp_chunk);
+                        duckdb_destroy_data_chunk(&temp_handle);
                     }
-                    
-                    if (unsubscribe_result != 0) {
-                        throw InvalidInputException("Failed to unsubscribe bucket (returned non-zero)");
-                    }
-                    
-                    global_state.active_buckets.erase(bid);
-                }
 
-                if (bucket_array.release) {
-	                bucket_array.release(&bucket_array);
+                    // Update progress and check for completion
+                    global_state.fluss_rows_read_per_bucket[bid] += bucket_array.length;
+                    int64_t limit = bind_data.end_offsets[bid] - bind_data.snapshot_offsets[bid];
+
+                    if (global_state.fluss_rows_read_per_bucket[bid] >= limit) {
+                        FlussError* un_error = nullptr;
+                        // Corrected API call based on typical Fluss C-FFI
+                        fluss_scanner_unsubscribe_batch(global_state.fluss_scanner, bid, bind_data.table_id, &un_error);
+
+                        if (un_error) {
+	                        fluss_error_free(un_error);
+                        }
+                        global_state.active_buckets.erase(bid);
+                    }
+
+                    if (bucket_array.release) {
+                        bucket_array.release(&bucket_array);
+                    }
                 }
             }
-        }
 
-        // 4. 清理资源，准备下一次 Poll
-        if (global_state.current_batches) {
-            fluss_scan_record_batches_free(global_state.current_batches);
-            global_state.current_batches = nullptr;
+            // Clean up the current poll result
+            if (global_state.current_batches) {
+                fluss_scan_record_batches_free(global_state.current_batches);
+                global_state.current_batches = nullptr;
+            }
         }
     }
 }

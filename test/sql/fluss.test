@@ -1,0 +1,92 @@
+# name: test/sql/fluss.test
+# description: test fluss extension
+# group: [sql]
+
+# Before we load the extension, this will fail
+statement error
+SELECT * FROM fluss_read('127.0.0.1:50002', 'fluss', 'logTable');
+----
+Catalog Error: Table Function with name fluss_read does not exist!
+
+# Allow unsigned extensions to be loaded
+require fluss
+
+
+# Confirm the extension is loaded
+query I
+SELECT extension_name FROM duckdb_extensions() WHERE extension_name = 'fluss';
+----
+fluss
+
+# Test fluss_read function - verify it can be called and returns schema
+# This will succeed even if the table is empty, as long as the table exists
+statement ok
+SELECT * FROM fluss_read('127.0.0.1:50002', 'fluss', 'logTable') LIMIT 0;
+
+# Verify the function returns the correct number of rows
+query I
+SELECT COUNT(*) FROM fluss_read('127.0.0.1:50002', 'fluss', 'logTable');
+----
+2
+
+# Test with explicit database parameter (should be same as default)
+query I
+SELECT COUNT(*) FROM fluss_read('127.0.0.1:50002', 'fluss', 'logTable');
+----
+2
+
+# Verify we can query the table function multiple times
+statement ok
+SELECT * FROM fluss_read('127.0.0.1:50002', 'fluss', 'logTable') LIMIT 10;
+
+# Verify the function works with WHERE clause (if table has data)
+statement ok
+SELECT * FROM fluss_read('127.0.0.1:50002', 'fluss', 'logTable') WHERE 1=0;
+
+# Verify we can get column information using DESCRIBE
+statement ok
+DESCRIBE SELECT * FROM fluss_read('127.0.0.1:50002', 'fluss', 'logTable');
+
+# Verify the function returns consistent results
+query I
+SELECT COUNT(*) FROM (
+    SELECT * FROM fluss_read('127.0.0.1:50002', 'fluss', 'logTable')
+);
+----
+2
+
+# Test that the function can be used in a CTE
+query I
+WITH fluss_data AS (
+    SELECT * FROM fluss_read('127.0.0.1:50002', 'fluss', 'logTable')
+)
+SELECT COUNT(*) FROM fluss_data;
+----
+2
+
+# Verify the actual data content - check all rows
+query TTT
+SELECT * FROM fluss_read('127.0.0.1:50002', 'fluss', 'logTable') ORDER BY a;
+----
+1	2	3
+4	5	6
+
+# Verify column names and data types
+query TTT
+SELECT a, b, c FROM fluss_read('127.0.0.1:50002', 'fluss', 'logTable') ORDER BY a;
+----
+1	2	3
+4	5	6
+
+# Verify we can filter data
+query I
+SELECT COUNT(*) FROM fluss_read('127.0.0.1:50002', 'fluss', 'logTable') WHERE a = '1';
+----
+1
+
+# Verify we can select specific columns
+query T
+SELECT a FROM fluss_read('127.0.0.1:50002', 'fluss', 'logTable') ORDER BY a;
+----
+1
+4
