@@ -15,6 +15,7 @@
 #include <vector>
 #include <map>
 #include <set>
+#include "duckdb/common/printer.hpp"
 
 namespace duckdb {
 
@@ -624,7 +625,14 @@ static void FlussFunction(ClientContext &context, TableFunctionInput &data_p, Da
                         auto* temp_chunk = reinterpret_cast<DataChunk*>(temp_handle);
                         output.Append(*temp_chunk);
                         duckdb_destroy_data_chunk(&temp_handle);
+                    } else {
+                    	// ONLY manually release if the conversion was never successfully
+                    	// handed off to DuckDB.
+                    	if (bucket_array.release) {
+                    		bucket_array.release(&bucket_array);
+                    	}
                     }
+
 
                     // Update progress and check for completion
                     global_state.fluss_rows_read_per_bucket[bid] += bucket_array.length;
@@ -639,10 +647,6 @@ static void FlussFunction(ClientContext &context, TableFunctionInput &data_p, Da
 	                        fluss_error_free(un_error);
                         }
                         global_state.active_buckets.erase(bid);
-                    }
-
-                    if (bucket_array.release) {
-                        bucket_array.release(&bucket_array);
                     }
                 }
             }

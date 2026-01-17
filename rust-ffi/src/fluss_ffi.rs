@@ -25,6 +25,7 @@ use std::time::Duration;
 // Import through fluss's arrow version
 use arrow::array::StructArray;
 use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
+use arrow::compute;
 use arrow_array::ffi::to_ffi;
 use arrow_array::Array;
 use arrow_array::RecordBatch;
@@ -984,11 +985,28 @@ pub extern "C" fn fluss_scan_record_batches_get_batch_for_bucket(
             return 1; // No batches for this bucket
         }
 
-        // Get the first batch and remove it from the vector
-        let batch = bucket_batches.remove(0);
+        // Merge all batches for this bucket into one
+        let merged_batch = if bucket_batches.len() == 1 {
+            // Only one batch, use it directly
+            bucket_batches.remove(0)
+        } else {
+            // Multiple batches, concatenate them
+            // Take all batches and clear the vector
+            let all_batches = std::mem::take(bucket_batches);
+            
+            // Concatenate all batches
+            match compute::concat_batches(&all_batches[0].schema(), &all_batches) {
+                Ok(merged) => merged,
+                Err(_) => {
+                    // If concatenation fails, put batches back and return error
+                    *bucket_batches = all_batches;
+                    return 1;
+                }
+            }
+        };
         
         // Convert to FFI
-        let struct_array = StructArray::from(batch);
+        let struct_array = StructArray::from(merged_batch);
         let array_data = struct_array.to_data();
 
         match to_ffi(&array_data) {
