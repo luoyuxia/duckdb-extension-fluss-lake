@@ -1,10 +1,10 @@
 [package]
-name = "paimon-ffi"
+name = "fluss-ffi"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "paimon_ffi"
+name = "fluss_ffi"
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]

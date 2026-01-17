@@ -1,4 +1,4 @@
-# DuckDB Paimon Extension
+# DuckDB Fluss Extension
 
 A DuckDB extension based on [paimon-rust](https://github.com/apache/paimon-rust) that allows reading Apache Paimon tables directly in DuckDB.
 
@@ -22,11 +22,11 @@ The project uses Git Submodules, so you need to clone both the main project and 
 ```bash
 # Method 1: Clone with submodules initialized (recommended)
 git clone --recurse-submodules <repository-url>
-cd duckdb-extension-paimon
+cd duckdb-extension-fluss-lake
 
 # Method 2: If you've already cloned the project, initialize submodules
 git clone <repository-url>
-cd duckdb-extension-paimon
+cd duckdb-extension-fluss-lake
 git submodule update --init --recursive
 ```
 
@@ -47,16 +47,16 @@ If submodules are not properly initialized, the build will fail.
 ## Project Structure
 
 ```
-duckdb-extension-paimon/
+duckdb-extension-fluss-lake/
 ├── rust-ffi/              # Rust FFI wrapper layer
 │   ├── Cargo.toml
 │   └── src/
 │       └── lib.rs         # C ABI interface
 ├── src/
 │   ├── include/
-│   │   ├── paimon_extension.hpp
-│   │   └── paimon_ffi.h   # C++ FFI header
-│   └── paimon_extension.cpp  # DuckDB extension implementation
+│   │   ├── fluss_extension.hpp
+│   │   └── fluss_ffi.h   # C++ FFI header
+│   └── fluss_extension.cpp  # DuckDB extension implementation
 ├── CMakeLists.txt
 └── extension_config.cmake
 ```
@@ -93,13 +93,13 @@ If you're using **macOS** and **DuckDB 1.4.2**, you can directly download the pr
 
 ```bash
 # Download pre-built extension
-curl -L -o paimon.duckdb_extension \
-  https://github.com/luoyuxia/duckdb-extension-paimon/releases/download/0.0.1-beta/paimon.duckdb_extension
+curl -L -o fluss.duckdb_extension \
+  https://github.com/luoyuxia/duckdb-extension-fluss-lake/releases/download/0.0.1-beta/fluss.duckdb_extension
 
 # Load in DuckDB
 duckdb -unsigned
 # Then in the DuckDB shell, execute:
-LOAD '/path/to/paimon.duckdb_extension';
+LOAD '/path/to/fluss.duckdb_extension';
 ```
 
 **Important Notes**:
@@ -150,20 +150,20 @@ cmake .. -DCMAKE_BUILD_TYPE=Release -DDUCKDB_VERSION=v1.4.2
 For CPP ABI, the version must exactly match the DuckDB version you're using. The build system will try to auto-detect, but if detection fails, you need to specify it manually.
 
 After building, you'll find in the `build/` directory:
-- `paimon.duckdb_extension` - Loadable extension file
-- `libpaimon_extension.a` - Static library file
+- `fluss.duckdb_extension` - Loadable extension file
+- `libfluss_extension.a` - Static library file
 
 ## Usage
 
-After loading the extension, you can use the `paimon_read` table function to read Paimon tables:
+After loading the extension, you can use the `fluss_read` table function to read Paimon tables:
 
 ```sql
 -- Load extension
-LOAD 'paimon';
+LOAD 'fluss';
 
 -- Read Paimon table
 -- Supports log tables and primary key tables with Deletion Vector enabled
-SELECT * FROM paimon_read('/path/to/warehouse', 'database_name', 'table_name');
+SELECT * FROM fluss_read('/path/to/warehouse', 'database_name', 'table_name');
 ```
 
 **Note**: Currently only supports log tables and primary key tables with Deletion Vector enabled. If you try to read unsupported table types, you may encounter errors.

@@ -4,7 +4,7 @@
 
 namespace duckdb {
 
-class PaimonExtension : public Extension {
+class FlussExtension : public Extension {
 public:
 	void Load(ExtensionLoader &db) override;
 	std::string Name() override;
@@ -12,4 +12,3 @@ public:
 };
 
 } // namespace duckdb
-

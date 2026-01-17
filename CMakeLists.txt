@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.10)
 
 # Set extension name here
-set(TARGET_NAME paimon)
+set(TARGET_NAME fluss)
 
 # DuckDB's extension distribution supports vcpkg. As such, dependencies can be added in ./vcpkg.json and then
 # used in cmake with find_package. Feel free to remove or replace with other dependencies.
@@ -18,7 +18,7 @@ include_directories(src/include)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-set(EXTENSION_SOURCES src/paimon_extension.cpp)
+set(EXTENSION_SOURCES src/fluss_extension.cpp)
 
 # Find Rust compiler
 find_program(CARGO cargo)
@@ -55,11 +55,11 @@ if(RUST_BUILD_ENABLED)
     
     # Set library name based on platform
     if(APPLE)
-        set(RUST_LIB_NAME "libpaimon_ffi.a")
+        set(RUST_LIB_NAME "libfluss_ffi.a")
     elseif(UNIX)
-        set(RUST_LIB_NAME "libpaimon_ffi.a")
+        set(RUST_LIB_NAME "libfluss_ffi.a")
     elseif(WIN32)
-        set(RUST_LIB_NAME "paimon_ffi.lib")
+        set(RUST_LIB_NAME "fluss_ffi.lib")
     endif()
     
     # For single-config, use direct path; for multi-config, we'll handle it in the custom command
@@ -72,11 +72,11 @@ if(RUST_BUILD_ENABLED)
     endif()
     
     # Create a custom target for building Rust library
-    set(PAIMON_FFI_BUILD_TARGET ${TARGET_NAME}_rust_build)
+    set(FLUSS_FFI_BUILD_TARGET ${TARGET_NAME}_rust_build)
     
     if(CMAKE_CONFIGURATION_TYPES)
         # Multi-config: build both debug and release
-        add_custom_target(${PAIMON_FFI_BUILD_TARGET}
+        add_custom_target(${FLUSS_FFI_BUILD_TARGET}
             COMMAND ${CARGO} build --manifest-path ${RUST_FFI_DIR}/Cargo.toml
                     --target-dir ${RUST_TARGET_DIR}
             COMMAND ${CARGO} build --manifest-path ${RUST_FFI_DIR}/Cargo.toml
@@ -96,7 +96,7 @@ if(RUST_BUILD_ENABLED)
             set(CARGO_RELEASE_FLAG "")
         endif()
         
-        add_custom_target(${PAIMON_FFI_BUILD_TARGET}
+        add_custom_target(${FLUSS_FFI_BUILD_TARGET}
             COMMAND ${CARGO} build --manifest-path ${RUST_FFI_DIR}/Cargo.toml
                     --target-dir ${RUST_TARGET_DIR}
                     ${CARGO_RELEASE_FLAG}
@@ -108,26 +108,26 @@ if(RUST_BUILD_ENABLED)
     
     # Create imported library target with a unique name to avoid conflicts
     # Use a name that's scoped to this extension
-    set(PAIMON_FFI_TARGET_NAME ${TARGET_NAME}_paimon_ffi)
-    add_library(${PAIMON_FFI_TARGET_NAME} STATIC IMPORTED)
+    set(FLUSS_FFI_TARGET_NAME ${TARGET_NAME}_fluss_ffi)
+    add_library(${FLUSS_FFI_TARGET_NAME} STATIC IMPORTED)
     
     # Make the imported library depend on the build target
-    add_dependencies(${PAIMON_FFI_TARGET_NAME} ${PAIMON_FFI_BUILD_TARGET})
+    add_dependencies(${FLUSS_FFI_TARGET_NAME} ${FLUSS_FFI_BUILD_TARGET})
     
     if(CMAKE_CONFIGURATION_TYPES)
-        set_target_properties(${PAIMON_FFI_TARGET_NAME} PROPERTIES
+        set_target_properties(${FLUSS_FFI_TARGET_NAME} PROPERTIES
             IMPORTED_LOCATION_RELEASE ${RUST_LIB_PATH_RELEASE}
             IMPORTED_LOCATION_DEBUG ${RUST_LIB_PATH_DEBUG}
             IMPORTED_LOCATION_RELWITHDEBINFO ${RUST_LIB_PATH_RELEASE}
         )
     else()
-        set_target_properties(${PAIMON_FFI_TARGET_NAME} PROPERTIES
+        set_target_properties(${FLUSS_FFI_TARGET_NAME} PROPERTIES
             IMPORTED_LOCATION ${RUST_LIB_PATH}
         )
     endif()
     
     # Set a variable for use in linking
-    set(paimon_ffi ${PAIMON_FFI_TARGET_NAME})
+    set(fluss_ffi ${FLUSS_FFI_TARGET_NAME})
     
     # Find Rust standard library (needed for linking)
     execute_process(
@@ -186,8 +186,8 @@ if(COMMAND build_static_extension)
     
     # Link Rust FFI library if available
     if(RUST_BUILD_ENABLED)
-        target_link_libraries(${EXTENSION_NAME} ${PAIMON_FFI_TARGET_NAME})
-        target_link_libraries(${LOADABLE_EXTENSION_NAME} ${PAIMON_FFI_TARGET_NAME})
+        target_link_libraries(${EXTENSION_NAME} ${FLUSS_FFI_TARGET_NAME})
+        target_link_libraries(${LOADABLE_EXTENSION_NAME} ${FLUSS_FFI_TARGET_NAME})
         
         # Platform-specific linking for Rust dependencies
         if(APPLE)
@@ -243,7 +243,7 @@ else()
     add_library(${EXTENSION_NAME} STATIC ${EXTENSION_SOURCES})
     target_link_libraries(${EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto)
     if(RUST_BUILD_ENABLED)
-        target_link_libraries(${EXTENSION_NAME} ${PAIMON_FFI_TARGET_NAME})
+        target_link_libraries(${EXTENSION_NAME} ${FLUSS_FFI_TARGET_NAME})
         # Platform-specific linking for Rust dependencies
         if(APPLE)
             target_link_libraries(${EXTENSION_NAME} 
@@ -261,7 +261,7 @@ else()
     add_library(${LOADABLE_EXTENSION_NAME}_raw SHARED ${EXTENSION_SOURCES})
     target_link_libraries(${LOADABLE_EXTENSION_NAME}_raw OpenSSL::SSL OpenSSL::Crypto)
     if(RUST_BUILD_ENABLED)
-        target_link_libraries(${LOADABLE_EXTENSION_NAME}_raw ${PAIMON_FFI_TARGET_NAME})
+        target_link_libraries(${LOADABLE_EXTENSION_NAME}_raw ${FLUSS_FFI_TARGET_NAME})
         # Platform-specific linking for Rust dependencies
         if(APPLE)
             target_link_libraries(${LOADABLE_EXTENSION_NAME}_raw

@@ -1,7 +1,7 @@
 #define DUCKDB_EXTENSION_MAIN
 
-#include "paimon_extension.hpp"
-#include "paimon_ffi.h"
+#include "fluss_extension.hpp"
+#include "fluss_ffi.h"
 #include "duckdb.hpp"
 #include "duckdb/common/arrow/arrow.hpp"
 #include "duckdb/common/exception.hpp"
@@ -15,20 +15,20 @@
 
 namespace duckdb {
 
-// Bind data for Paimon table function
-struct PaimonBindData : public TableFunctionData {
+// Bind data for Fluss table function
+struct FlussBindData : public TableFunctionData {
 	std::string warehouse_path;
 	std::string database;
 	std::string table;
 	PaimonCatalog* catalog = nullptr;
-	PaimonTable* paimon_table = nullptr;  // Store table
+	PaimonTable* paimon_table = nullptr;  // Store Paimon table
 	ArrowSchema arrow_schema;  // Arrow schema exported from table
 
-	PaimonBindData() {
+	FlussBindData() {
 		arrow_schema.Init();
 	}
 
-	~PaimonBindData() override {
+	~FlussBindData() override {
 		if (arrow_schema.release) {
 			arrow_schema.release(&arrow_schema);
 		}
@@ -43,13 +43,13 @@ struct PaimonBindData : public TableFunctionData {
 	}
 };
 
-// Global state for Paimon table function
-struct PaimonGlobalState : public GlobalTableFunctionState {
+// Global state for Fluss table function
+struct FlussGlobalState : public GlobalTableFunctionState {
 	PaimonScan* scan = nullptr;
 	duckdb_arrow_converted_schema converted_schema = nullptr;
 	Connection* connection = nullptr;
 
-	~PaimonGlobalState() override {
+	~FlussGlobalState() override {
 		if (converted_schema) {
 			duckdb_destroy_arrow_converted_schema(&converted_schema);
 		}
@@ -64,18 +64,18 @@ struct PaimonGlobalState : public GlobalTableFunctionState {
 	}
 };
 
-// Local state for Paimon table function (currently unused, but required by DuckDB API)
-struct PaimonLocalState : public LocalTableFunctionState {
+// Local state for Fluss table function (currently unused, but required by DuckDB API)
+struct FlussLocalState : public LocalTableFunctionState {
 };
 
-// Bind function for Paimon table function
-static unique_ptr<FunctionData> PaimonBind(ClientContext &context, TableFunctionBindInput &input,
+// Bind function for Fluss table function
+static unique_ptr<FunctionData> FlussBind(ClientContext &context, TableFunctionBindInput &input,
                                             vector<LogicalType> &return_types, vector<string> &names) {
-	auto result = make_uniq<PaimonBindData>();
+	auto result = make_uniq<FlussBindData>();
 
 	// Get warehouse path (required)
 	if (input.inputs.empty()) {
-		throw InvalidInputException("paimon_read requires at least warehouse_path parameter");
+		throw InvalidInputException("fluss_read requires at least warehouse_path parameter");
 	}
 	result->warehouse_path = input.inputs[0].GetValue<string>();
 
@@ -83,7 +83,7 @@ static unique_ptr<FunctionData> PaimonBind(ClientContext &context, TableFunction
 	// - 2 parameters: warehouse_path, table (database defaults to "default")
 	// - 3 parameters: warehouse_path, database, table
 	if (input.inputs.size() < 2) {
-		throw InvalidInputException("paimon_read requires at least warehouse_path and table parameters");
+		throw InvalidInputException("fluss_read requires at least warehouse_path and table parameters");
 	}
 	
 	if (input.inputs.size() == 2) {
@@ -96,7 +96,7 @@ static unique_ptr<FunctionData> PaimonBind(ClientContext &context, TableFunction
 		result->table = input.inputs[2].GetValue<string>();
 	}
 
-	// Create catalog
+	// Create Paimon catalog
 	result->catalog = paimon_catalog_new(result->warehouse_path.c_str());
 	if (!result->catalog) {
 		throw InvalidInputException("Failed to create Paimon catalog");
@@ -139,10 +139,10 @@ static unique_ptr<FunctionData> PaimonBind(ClientContext &context, TableFunction
 }
 
 // Initialize global state
-static unique_ptr<GlobalTableFunctionState> PaimonInitGlobal(ClientContext &context,
+static unique_ptr<GlobalTableFunctionState> FlussInitGlobal(ClientContext &context,
                                                               TableFunctionInitInput &input) {
-	auto &bind_data = const_cast<PaimonBindData&>(input.bind_data->Cast<PaimonBindData>());
-	auto result = make_uniq<PaimonGlobalState>();
+	auto &bind_data = const_cast<FlussBindData&>(input.bind_data->Cast<FlussBindData>());
+	auto result = make_uniq<FlussGlobalState>();
 
 	// Now perform the actual scan using PaimonTable
 	PaimonError* paimon_error = nullptr;
@@ -181,15 +181,15 @@ static unique_ptr<GlobalTableFunctionState> PaimonInitGlobal(ClientContext &cont
 }
 
 // Initialize local state
-static unique_ptr<LocalTableFunctionState> PaimonInitLocal(ExecutionContext &context,
+static unique_ptr<LocalTableFunctionState> FlussInitLocal(ExecutionContext &context,
                                                            TableFunctionInitInput &input,
                                                            GlobalTableFunctionState *global_state) {
-	return make_uniq<PaimonLocalState>();
+	return make_uniq<FlussLocalState>();
 }
 
 // Main table function
-static void PaimonFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
-	auto &global_state = data_p.global_state->Cast<PaimonGlobalState>();
+static void FlussFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+	auto &global_state = data_p.global_state->Cast<FlussGlobalState>();
 
 	output.Reset();
 
@@ -232,35 +232,35 @@ static void PaimonFunction(ClientContext &context, TableFunctionInput &data_p, D
 }
 
 static void LoadInternal(ExtensionLoader &loader) {
-	// Register table function: paimon_read(warehouse_path, table) or paimon_read(warehouse_path, database, table)
-	TableFunctionSet paimon_read_set("paimon_read");
+	// Register table function: fluss_read(warehouse_path, table) or fluss_read(warehouse_path, database, table)
+	TableFunctionSet fluss_read_set("fluss_read");
 	
 	// 2 parameters: warehouse_path, table (database defaults to "default")
-	TableFunction paimon_read_2("paimon_read",
+	TableFunction fluss_read_2("fluss_read",
 	                             {LogicalType::VARCHAR, LogicalType::VARCHAR},
-	                             PaimonFunction, PaimonBind, PaimonInitGlobal, PaimonInitLocal);
-	paimon_read_set.AddFunction(paimon_read_2);
+	                             FlussFunction, FlussBind, FlussInitGlobal, FlussInitLocal);
+	fluss_read_set.AddFunction(fluss_read_2);
 	
 	// 3 parameters: warehouse_path, database, table
-	TableFunction paimon_read_3("paimon_read",
+	TableFunction fluss_read_3("fluss_read",
 	                             {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
-	                             PaimonFunction, PaimonBind, PaimonInitGlobal, PaimonInitLocal);
-	paimon_read_set.AddFunction(paimon_read_3);
+	                             FlussFunction, FlussBind, FlussInitGlobal, FlussInitLocal);
+	fluss_read_set.AddFunction(fluss_read_3);
 	
-	loader.RegisterFunction(paimon_read_set);
+	loader.RegisterFunction(fluss_read_set);
 }
 
-void PaimonExtension::Load(ExtensionLoader &loader) {
+void FlussExtension::Load(ExtensionLoader &loader) {
 	LoadInternal(loader);
 }
 
-std::string PaimonExtension::Name() {
-	return "paimon";
+std::string FlussExtension::Name() {
+	return "fluss";
 }
 
-std::string PaimonExtension::Version() const {
-#ifdef EXT_VERSION_PAIMON
-	return EXT_VERSION_PAIMON;
+std::string FlussExtension::Version() const {
+#ifdef EXT_VERSION_FLUSS
+	return EXT_VERSION_FLUSS;
 #else
 	return "";
 #endif
@@ -270,9 +270,8 @@ std::string PaimonExtension::Version() const {
 
 extern "C" {
 
-DUCKDB_CPP_EXTENSION_ENTRY(paimon, loader) {
+DUCKDB_CPP_EXTENSION_ENTRY(fluss, loader) {
 	duckdb::LoadInternal(loader);
 }
 
 }
-

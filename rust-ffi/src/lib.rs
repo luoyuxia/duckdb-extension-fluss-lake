@@ -430,4 +430,3 @@ fn create_error(msg: &str) -> *mut PaimonError {
     };
     Box::into_raw(Box::new(PaimonError { message: c_msg }))
 }
-

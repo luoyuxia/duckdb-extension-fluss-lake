@@ -1,4 +1,4 @@
-# Paimon DuckDB Extension 测试结果
+# Fluss DuckDB Extension 测试结果
 
 ## 测试时间
 2024-11-23
@@ -6,24 +6,24 @@
 ## 测试环境
 - DuckDB 版本: v1.4.1 (Andium)
 - 平台: osx_arm64
-- Extension 文件: `build/paimon.duckdb_extension` (11MB)
+- Extension 文件: `build/fluss.duckdb_extension` (11MB)
 
 ## 测试结果
 
 ### ✅ 扩展加载
 - **状态**: 成功
-- **命令**: `LOAD '/path/to/paimon.duckdb_extension'`
+- **命令**: `LOAD '/path/to/fluss.duckdb_extension'`
 - **结果**: Extension loaded successfully
 
 ### ✅ 函数注册
 - **状态**: 成功
-- **函数名**: `paimon_read`
+- **函数名**: `fluss_read`
 - **类型**: Table Function
-- **验证**: `SELECT function_name FROM duckdb_functions() WHERE function_name LIKE 'paimon%'` 返回 `paimon_read`
+- **验证**: `SELECT function_name FROM duckdb_functions() WHERE function_name LIKE 'fluss%'` 返回 `fluss_read`
 
 ### ⚠️ 表读取测试
 - **状态**: 部分成功（扩展功能正常，但表不存在）
-- **错误**: `Failed to scan Paimon table: Paimon data invalid for table don't exist: None`
+- **错误**: `Failed to scan Fluss table: Paimon data invalid for table don't exist: None`
 - **可能原因**:
   1. 表路径不存在或权限问题
   2. Paimon warehouse 目录结构可能不同
@@ -33,12 +33,12 @@
 
 ### 加载扩展
 ```sql
-LOAD '/path/to/paimon.duckdb_extension';
+LOAD '/path/to/fluss.duckdb_extension';
 ```
 
 ### 使用 table function
 ```sql
-SELECT * FROM paimon_read('/path/to/warehouse', 'database_name', 'table_name') LIMIT 10;
+SELECT * FROM fluss_read('/path/to/warehouse', 'database_name', 'table_name') LIMIT 10;
 ```
 
 ### 注意事项

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Build script for DuckDB Paimon Extension
+# Build script for DuckDB Fluss Extension
 # Supports both macOS and Linux
 
 set -e
@@ -21,7 +21,7 @@ else
     exit 1
 fi
 
-echo -e "${GREEN}Building DuckDB Paimon Extension for ${PLATFORM}${NC}"
+echo -e "${GREEN}Building DuckDB Fluss Extension for ${PLATFORM}${NC}"
 
 # Check for required tools
 echo "Checking for required tools..."
@@ -61,7 +61,7 @@ if [[ "$1" == "--update-deps" ]] || [[ "$1" == "-u" ]]; then
 fi
 
 # Check if submodules are initialized
-if [ ! -d "duckdb/.git" ] || [ ! -d "extension-ci-tools/.git" ]; then
+if [ ! -e "duckdb/.git" ] || [ ! -e "extension-ci-tools/.git" ]; then
     echo -e "${RED}Error: Git submodules are not initialized!${NC}"
     echo -e "${YELLOW}Please run one of the following:${NC}"
     echo "  git submodule update --init --recursive"
@@ -101,17 +101,17 @@ if [ $? -eq 0 ]; then
     echo -e "${GREEN}✓ Build successful!${NC}"
     echo ""
     echo "Extension files:"
-    if [ -f "paimon.duckdb_extension" ]; then
-        echo "  - paimon.duckdb_extension (loadable extension)"
-        ls -lh paimon.duckdb_extension
+    if [ -f "fluss.duckdb_extension" ]; then
+        echo "  - fluss.duckdb_extension (loadable extension)"
+        ls -lh fluss.duckdb_extension
     fi
-    if [ -f "libpaimon_extension.a" ]; then
-        echo "  - libpaimon_extension.a (static library)"
-        ls -lh libpaimon_extension.a
+    if [ -f "libfluss_extension.a" ]; then
+        echo "  - libfluss_extension.a (static library)"
+        ls -lh libfluss_extension.a
     fi
     echo ""
     echo -e "${GREEN}You can now load the extension in DuckDB:${NC}"
-    echo "  LOAD 'paimon';"
+    echo "  LOAD 'fluss';"
     echo ""
     echo -e "${YELLOW}Note:${NC} If paimon-rust poc branch was updated, run:"
     echo "  ./build.sh --update-deps"

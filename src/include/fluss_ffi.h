@@ -43,4 +43,3 @@ const char* paimon_error_get_message(const PaimonError* error);
 #ifdef __cplusplus
 }
 #endif
-
