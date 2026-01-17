@@ -13,10 +13,12 @@ crate-type = ["cdylib", "staticlib"]
 # 如果遇到问题，可以尝试添加 package 参数：
 # paimon = { git = "https://github.com/luoyuxia/paimon-rust", branch = "poc", package = "paimon" }
 paimon = { git = "https://github.com/luoyuxia/paimon-rust", branch = "poc" }
+# Fluss crate from local path
+fluss = { path = "/Users/yuxia/Projects/fluss/fluss-rust/crates/fluss" }
 tokio = { version = "1.39", features = ["full"] }
-arrow-array = "55"
-arrow-schema = "55"
-arrow = { version = "55", features = ["ffi"] }
+arrow = { version = "57.0.0", features = ["ffi"] }
+arrow-array = "57.0.0"
+arrow-schema = "57.0.0"
 futures-util = "0.3"
 
 [profile.release]
